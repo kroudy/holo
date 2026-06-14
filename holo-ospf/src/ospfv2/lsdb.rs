@@ -27,22 +27,24 @@ use crate::lsdb::{
     self, LsaEntry, LsaOriginateEvent, LsdbVersion, MAX_LINK_METRIC,
 };
 use crate::neighbor::nsm;
-use crate::ospfv2::packet::Options;
+use crate::ospfv2::packet::iana::{
+    LsaExtPrefixFlags, LsaOpaqueType, LsaRouterFlags, LsaRouterLinkType,
+    LsaTypeCode, Options,
+};
 use crate::ospfv2::packet::lsa::{
-    LsaBody, LsaHdr, LsaNetwork, LsaRouter, LsaRouterFlags, LsaRouterLink,
-    LsaRouterLinkType, LsaSummary, LsaType, LsaTypeCode,
+    LsaBody, LsaHdr, LsaNetwork, LsaRouter, LsaRouterLink, LsaSummary, LsaType,
 };
 use crate::ospfv2::packet::lsa_opaque::{
     ExtLinkTlv, ExtPrefixRouteType, ExtPrefixTlv, LsaExtLink, LsaExtPrefix,
-    LsaExtPrefixFlags, LsaOpaque, LsaOpaqueType, LsaRouterInfo, OpaqueLsaId,
-    PrefixSid,
+    LsaOpaque, LsaRouterInfo, OpaqueLsaId, PrefixSid,
 };
+use crate::packet::iana::RouterInfoCaps;
 use crate::packet::lsa::{
     Lsa, LsaHdrVersion, LsaKey, LsaScope, LsaTypeVersion,
 };
 use crate::packet::tlv::{
-    DynamicHostnameTlv, NodeAdminTagTlv, PrefixSidFlags, RouterInfoCaps,
-    RouterInfoCapsTlv, SidLabelRangeTlv, SrAlgoTlv, SrLocalBlockTlv,
+    DynamicHostnameTlv, NodeAdminTagTlv, PrefixSidFlags, RouterInfoCapsTlv,
+    SidLabelRangeTlv, SrAlgoTlv, SrLocalBlockTlv,
 };
 use crate::route::{SummaryNet, SummaryRtr};
 use crate::version::Ospfv2;
@@ -138,12 +140,17 @@ impl LsdbVersion<Self> for Ospfv2 {
                 // Originate Router Information LSA(s).
                 lsa_orig_router_info(area, instance);
             }
-            LsaOriginateEvent::InterfaceStateChange { .. } => {
+            LsaOriginateEvent::InterfaceStateChange { area_id, .. } => {
                 // (Re)originate Router-LSA in all areas since the ABR status
                 // might have changed.
                 for area in arenas.areas.iter() {
                     lsa_orig_router(area, instance, arenas);
                 }
+
+                // (Re)originate Extended Prefix Opaque LSA(s) since the set of
+                // loopback interfaces with the node flag might have changed.
+                let (_, area) = arenas.areas.get_by_id(area_id)?;
+                lsa_orig_ext_prefix(area, instance, arenas);
             }
             LsaOriginateEvent::InterfaceDrChange { area_id, iface_id }
             | LsaOriginateEvent::GrHelperExit { area_id, iface_id } => {
@@ -170,11 +177,20 @@ impl LsdbVersion<Self> for Ospfv2 {
                 // (Re)originate Router-LSA.
                 let (_, area) = arenas.areas.get_by_id(area_id)?;
                 lsa_orig_router(area, instance, arenas);
+
+                // (Re)originate Extended Prefix Opaque LSA(s) since the set of
+                // loopback host prefixes might have changed.
+                lsa_orig_ext_prefix(area, instance, arenas);
             }
             LsaOriginateEvent::InterfaceCostChange { area_id } => {
                 // (Re)originate Router-LSA.
                 let (_, area) = arenas.areas.get_by_id(area_id)?;
                 lsa_orig_router(area, instance, arenas);
+            }
+            LsaOriginateEvent::InterfaceFlagChange { area_id } => {
+                // (Re)originate Extended Prefix Opaque LSA(s).
+                let (_, area) = arenas.areas.get_by_id(area_id)?;
+                lsa_orig_ext_prefix(area, instance, arenas);
             }
             LsaOriginateEvent::NeighborToFromFull { area_id, iface_id } => {
                 // (Re)originate Router-LSA.
@@ -703,14 +719,11 @@ fn lsa_orig_ext_prefix(
 
     // Initialize prefixes.
     let mut prefixes = BTreeMap::new();
+
+    // Add Prefix-SIDs.
     if instance.config.sr_enabled {
         for ((prefix, algo), prefix_sid) in sr_config.prefix_sids.iter() {
             if let IpNetwork::V4(prefix) = prefix {
-                let mut flags = LsaExtPrefixFlags::empty();
-                if prefix.is_host_prefix() {
-                    flags.insert(LsaExtPrefixFlags::N);
-                }
-
                 // Add Prefix-SID Sub-TLV.
                 let mut psid_flags = PrefixSidFlags::empty();
                 let mut prefix_sids = BTreeMap::new();
@@ -733,7 +746,7 @@ fn lsa_orig_ext_prefix(
                     ExtPrefixTlv {
                         route_type: ExtPrefixRouteType::IntraArea,
                         af: 0,
-                        flags,
+                        flags: LsaExtPrefixFlags::empty(),
                         prefix: *prefix,
                         prefix_sids,
                         unknown_tlvs: vec![],
@@ -741,6 +754,43 @@ fn lsa_orig_ext_prefix(
                 );
             }
         }
+    }
+
+    // Set the N-flag (RFC 7684) and AC-flag (RFC 9983) on interface
+    // prefixes that have the corresponding flag configured.
+    for (prefix, flags) in area
+        .interfaces
+        .iter(&arenas.interfaces)
+        .filter(|iface| !iface.is_down())
+        .flat_map(|iface| {
+            iface.system.addr_list.iter().filter_map(move |addr| {
+                let mut flags = LsaExtPrefixFlags::empty();
+                if iface.config.node_flag
+                    && iface.state.ism_state == ism::State::Loopback
+                    && addr.is_host_prefix()
+                {
+                    flags.insert(LsaExtPrefixFlags::N);
+                } else if iface.config.anycast_flag {
+                    flags.insert(LsaExtPrefixFlags::AC);
+                }
+                if flags.is_empty() {
+                    return None;
+                }
+                Some((addr.apply_mask(), flags))
+            })
+        })
+    {
+        prefixes
+            .entry(prefix)
+            .and_modify(|tlv| tlv.flags.insert(flags))
+            .or_insert_with(|| {
+                ExtPrefixTlv::new(
+                    ExtPrefixRouteType::IntraArea,
+                    0,
+                    flags,
+                    prefix,
+                )
+            });
     }
 
     // (Re)originate as many Extended Prefix Opaque LSAs as necessary.
@@ -765,19 +815,15 @@ fn lsa_orig_ext_prefix(
         // Increment the Opaque ID.
         opaque_id += 1;
     };
-    if prefixes.is_empty() {
-        originate_fn(prefixes);
-    } else {
-        for prefixes in prefixes
-            .into_iter()
-            .chunks(
-                (Lsa::<Ospfv2>::MAX_LENGTH - LsaHdr::LENGTH as usize)
-                    / ExtPrefixTlv::BASE_LENGTH as usize,
-            )
-            .into_iter()
-        {
-            originate_fn(prefixes.collect());
-        }
+    for prefixes in prefixes
+        .into_iter()
+        .chunks(
+            (Lsa::<Ospfv2>::MAX_LENGTH - LsaHdr::LENGTH as usize)
+                / ExtPrefixTlv::BASE_LENGTH as usize,
+        )
+        .into_iter()
+    {
+        originate_fn(prefixes.collect());
     }
 
     // Flush self-originated Extended Prefix Opaque LSAs that are no longer

@@ -335,6 +335,13 @@ impl Pdu {
                     return Err(DecodeError::AuthTypeMismatch);
                 }
 
+                // Validate that the received digest length matches the
+                // algorithm's digest size.
+                let digest_size = auth_key.algo.digest_size() as usize;
+                if tlv_digest.len() != digest_size {
+                    return Err(DecodeError::AuthError);
+                }
+
                 // If processing an LSP, zero out the Checksum and Remaining
                 // Lifetime fields.
                 if is_lsp {
@@ -343,7 +350,6 @@ impl Pdu {
                 }
 
                 // Initialize the digest field with Apad (0x878FE1F3...).
-                let digest_size = auth_key.algo.digest_size() as usize;
                 let digest_offset = tlv_offset + 3;
                 buf_orig[digest_offset..digest_offset + digest_size]
                     .copy_from_slice(&HMAC_APAD[..digest_size]);
@@ -2052,8 +2058,11 @@ fn decode_pdu_length(
 ) -> DecodeResult<u16> {
     let pdu_len = buf.try_get_u16()?;
 
-    // Reject PDUs that extend beyond the input buffer.
-    if pdu_len > buf_orig.len() as u16 {
+    // Reject PDUs whose declared length is smaller than the fixed header
+    // or extends beyond the input buffer.
+    if pdu_len < Header::fixed_header_length(hdr.pdu_type) as u16
+        || pdu_len > buf_orig.len() as u16
+    {
         return Err(DecodeError::InvalidPduLength(hdr.pdu_type, pdu_len));
     }
 

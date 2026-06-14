@@ -362,7 +362,7 @@ fn update_rib_intra_area<V>(
         })
     {
         // Calculate stub metric.
-        let metric = stub.vertex.distance.saturating_add(stub.metric) as u32;
+        let metric = stub.vertex.distance.saturating_add(stub.metric.into());
 
         // Compare this distance to the current best cost to the stub network.
         // This is done by looking up the stub network's current routing table
@@ -389,12 +389,14 @@ fn update_rib_intra_area<V>(
             && let btree_map::Entry::Occupied(o) = rib.entry(stub.prefix)
         {
             let curr_route = o.get();
-            if metric > curr_route.metric
-                || origin.lsa_id < curr_route.origin.unwrap().lsa_id
+            if metric < curr_route.metric
+                || (metric == curr_route.metric
+                    && origin.lsa_id > curr_route.origin.unwrap().lsa_id)
             {
+                o.remove();
+            } else {
                 continue;
             }
-            o.remove();
         }
 
         // Create new intra-area route.
@@ -491,7 +493,7 @@ fn update_rib_inter_area_networks<V>(
 
         // The inter-area path cost is the distance to BR plus the cost
         // specified in the LSA.
-        let metric = route_br.metric + lsa.metric;
+        let metric = route_br.metric.saturating_add(lsa.metric);
 
         // Create new inter-area route.
         let mut new_route = RouteNet {
@@ -580,7 +582,7 @@ fn update_rib_transit_area<V>(
 
         // The inter-area path cost is the distance to BR plus the cost
         // specified in the LSA.
-        let metric = route_br.metric + lsa.metric;
+        let metric = route_br.metric.saturating_add(lsa.metric);
 
         // Create new inter-area route.
         let mut new_route = RouteNet {
@@ -698,7 +700,7 @@ fn update_rib_inter_area_routers<V>(
 
         // The inter-area path cost is the distance to BR plus the cost
         // specified in the LSA.
-        let metric = route_br.metric + lsa.metric;
+        let metric = route_br.metric.saturating_add(lsa.metric);
 
         // Create new inter-area route.
         let new_route = RouteRtr {
@@ -709,7 +711,28 @@ fn update_rib_inter_area_routers<V>(
             metric,
             nexthops: route_br.nexthops.clone(),
         };
-        area.state.routers.insert(lsa.router_id, new_route);
+
+        // Prefer intra-area over inter-area, then lowest metric, merging
+        // nexthops on ties.
+        match area.state.routers.entry(lsa.router_id) {
+            btree_map::Entry::Occupied(mut o) => {
+                let curr_route = o.get_mut();
+                let cmp = curr_route
+                    .path_type
+                    .cmp(&new_route.path_type)
+                    .then_with(|| curr_route.metric.cmp(&new_route.metric));
+                match cmp {
+                    Ordering::Less => {}
+                    Ordering::Equal => {
+                        curr_route.nexthops.extend(new_route.nexthops);
+                    }
+                    Ordering::Greater => *curr_route = new_route,
+                }
+            }
+            btree_map::Entry::Vacant(v) => {
+                v.insert(new_route);
+            }
+        }
     }
 }
 
@@ -800,7 +823,7 @@ fn update_rib_external<V>(
             }
             false => (
                 PathType::Type1External,
-                route_asbr.metric + lsa.metric,
+                route_asbr.metric.saturating_add(lsa.metric),
                 None,
             ),
         };

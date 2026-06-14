@@ -12,6 +12,7 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use holo_utils::bfd;
+use holo_utils::bier::BierCfg;
 use holo_utils::ip::IpNetworkKind;
 use holo_utils::southbound::{
     AddressMsg, InterfaceUpdateMsg, RouteKeyMsg, RouteMsg,
@@ -266,19 +267,27 @@ pub(crate) fn process_keychain_update(
     instance: &mut Instance,
     keychain_name: &str,
 ) -> Result<(), Error> {
-    let Some((mut instance, arenas)) = instance.as_up() else {
-        return Ok(());
-    };
+    // Update global auth if it uses this keychain.
+    if instance.config.auth.all.keychain.as_deref() == Some(keychain_name) {
+        let keychains = &instance.shared.keychains;
+        let auth = instance.config.auth.all.method(keychains);
+        instance.config.auth_resolved.store(Arc::new(auth));
 
-    for iface in arenas.interfaces.iter_mut() {
-        if iface.config.hello_auth.all.keychain.as_deref()
-            != Some(keychain_name)
-        {
-            continue;
+        // Schedule LSP reorigination to encode with the new key.
+        if let Some((mut instance, _)) = instance.as_up() {
+            instance.schedule_lsp_origination(instance.config.level_type);
         }
+    }
 
-        // Restart network Tx/Rx tasks.
-        iface.restart_network_tasks(&mut instance);
+    // Update hello auth on each interface that uses this keychain.
+    for iface in instance.arenas.interfaces.iter_mut() {
+        if iface.config.hello_auth.all.keychain.as_deref()
+            == Some(keychain_name)
+        {
+            let keychains = &instance.shared.keychains;
+            let auth = iface.config.hello_auth.all.method(keychains);
+            iface.config.hello_auth_resolved.store(Arc::new(auth));
+        }
     }
 
     Ok(())
@@ -293,6 +302,22 @@ pub(crate) fn process_sr_cfg_update(
 
     // Schedule LSP reorigination.
     if instance.config.sr.enabled
+        && let Some((mut instance, _)) = instance.as_up()
+    {
+        instance.schedule_lsp_origination(instance.config.level_type);
+    }
+}
+
+pub(crate) fn process_bier_cfg_update(
+    instance: &mut Instance,
+    bier_config: Arc<BierCfg>,
+) {
+    // Update BIER configuration.
+    instance.shared.bier_config = bier_config;
+
+    // Schedule LSP reorigination.
+    if instance.config.bier.enabled
+        && instance.config.bier.advertise
         && let Some((mut instance, _)) = instance.as_up()
     {
         instance.schedule_lsp_origination(instance.config.level_type);

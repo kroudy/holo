@@ -45,6 +45,8 @@ const SPF_LOG_TRIGGER_LSPS_MAX_SIZE: usize = 8;
 const MAX_PATH_METRIC_STANDARD: u32 = 1023;
 // Maximum total metric value for a complete path (wide metrics).
 const MAX_PATH_METRIC_WIDE: u32 = 0xFE000000;
+// Maximum value of the wide link metric.
+const MAX_LINK_METRIC_WIDE: u32 = 0x00FFFFFF;
 
 // A macro to chain multiple `Option<Iterator<Item = T>>` into a single
 // iterator.
@@ -89,8 +91,8 @@ pub struct Vertex {
 //
 // `VertexId` is designed to serve as a key in collections, such as `BTreeMap`,
 // that store vertices for the SPT and the tentative list. The `non_pseudonode`
-// flag ensures that non-pseudonode vertices are given priority and processed
-// first during the SPF algorithm.
+// flag ensures that pseudonode vertices are given priority and processed first
+// during the SPF algorithm.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct VertexId {
     pub non_pseudonode: bool,
@@ -865,7 +867,13 @@ fn compute_routes(
         else {
             continue;
         };
-        let att_bit = !instance.config.att_ignore && zeroth_lsp.att_bit(mt_id);
+        // Do not honor the ATT bit when the originator has the overload bit
+        // set, since the resulting default route would require transit
+        // through a router that has signalled it cannot forward transit
+        // traffic.
+        let att_bit = !instance.config.att_ignore
+            && zeroth_lsp.att_bit(mt_id)
+            && !zeroth_lsp.overload_bit(mt_id);
 
         for network in vertex_networks(
             instance.config.level_type,
@@ -1048,7 +1056,7 @@ fn vertex_edges<'a>(
                     // "If a link is advertised with the maximum link metric,
                     // this link MUST NOT be considered during the normal SPF
                     // computation".
-                    .filter(|reach| reach.metric < MAX_PATH_METRIC_WIDE)
+                    .filter(|reach| reach.metric < MAX_LINK_METRIC_WIDE)
                     .map(move |reach| {
                         let cost = vertex_edge_cost(
                             &reach.neighbor,
@@ -1072,7 +1080,7 @@ fn vertex_edges<'a>(
                     // "If a link is advertised with the maximum link metric,
                     // this link MUST NOT be considered during the normal SPF
                     // computation".
-                    .filter(|reach| reach.metric < MAX_PATH_METRIC_WIDE)
+                    .filter(|reach| reach.metric < MAX_LINK_METRIC_WIDE)
                     .map(move |reach| {
                         let cost = vertex_edge_cost(
                             &reach.neighbor,
@@ -1095,7 +1103,7 @@ fn vertex_edges<'a>(
                     // "If a link is advertised with the maximum link metric,
                     // this link MUST NOT be considered during the normal SPF
                     // computation".
-                    .filter(|reach| reach.metric < MAX_PATH_METRIC_WIDE)
+                    .filter(|reach| reach.metric < MAX_LINK_METRIC_WIDE)
                     .map(move |reach| {
                         let cost = vertex_edge_cost(
                             &reach.neighbor,
@@ -1258,16 +1266,23 @@ fn vertex_networks<'a>(
                 } else {
                     Box::new(lsp.tlvs.ipv6_reach())
                 };
-                let iter = iter.map(|reach| VertexNetwork {
-                    prefix: reach.prefix.into(),
-                    metric: reach.metric,
-                    external: reach.external,
-                    prefix_sid: reach
-                        .sub_tlvs
-                        .prefix_sids
-                        .get(&IgpAlgoType::Spf)
-                        .cloned(),
-                });
+                let iter = iter
+                    // RFC 5308 - Section 5:
+                    // "if a prefix is advertised with a metric larger than
+                    // MAX_V6_PATH_METRIC (0xFE000000), this prefix MUST not be
+                    // considered during the normal Shortest Path First (SPF)
+                    // computation".
+                    .filter(|reach| reach.metric <= MAX_PATH_METRIC_WIDE)
+                    .map(|reach| VertexNetwork {
+                        prefix: reach.prefix.into(),
+                        metric: reach.metric,
+                        external: reach.external,
+                        prefix_sid: reach
+                            .sub_tlvs
+                            .prefix_sids
+                            .get(&IgpAlgoType::Spf)
+                            .cloned(),
+                    });
                 ipv6_iter = Some(iter);
             }
 

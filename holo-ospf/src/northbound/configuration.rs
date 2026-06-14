@@ -27,7 +27,7 @@ use crate::interface::{InterfaceType, VirtualLinkKey, ism};
 use crate::lsdb::LsaOriginateEvent;
 use crate::neighbor::nsm;
 use crate::northbound::yang_gen::ospf;
-use crate::packet::PacketType;
+use crate::packet::iana::PacketType;
 use crate::route::RouteNetFlags;
 use crate::version::{Ospfv2, Ospfv3, Version};
 use crate::{gr, ibus, spf, sr, tasks};
@@ -63,6 +63,7 @@ pub enum Event {
     InterfaceResetDeadInterval(AreaIndex, InterfaceIndex),
     InterfacePriorityChange(AreaIndex, InterfaceIndex),
     InterfaceCostChange(AreaIndex),
+    InterfaceFlagChange(AreaIndex),
     InterfaceSyncHelloTx(AreaIndex, InterfaceIndex),
     InterfaceUpdateAuth(AreaIndex, InterfaceIndex),
     InterfaceBfdChange(InterfaceIndex),
@@ -183,6 +184,8 @@ pub struct InterfaceCfg<V: Version> {
     pub enabled: bool,
     pub cost: u16,
     pub mtu_ignore: bool,
+    pub node_flag: bool,
+    pub anycast_flag: bool,
     pub static_nbrs: BTreeMap<V::NetIpAddr, StaticNbr>,
     pub auth_keychain: Option<String>,
     pub auth_keyid: Option<u32>,
@@ -956,6 +959,31 @@ where
 
             let mtu_ignore = args.dnode.get_bool();
             iface.config.mtu_ignore = mtu_ignore;
+        })
+        .path(ospf::areas::area::interfaces::interface::node_flag::PATH)
+        .modify_apply(|instance, args| {
+            let (area_idx, iface_idx) = args.list_entry.into_interface().unwrap();
+            let iface = &mut instance.arenas.interfaces[iface_idx];
+
+            let node_flag = args.dnode.get_bool();
+            iface.config.node_flag = node_flag;
+
+            let event_queue = args.event_queue;
+            event_queue.insert(Event::InterfaceFlagChange(area_idx));
+        })
+        .path(ospf::areas::area::interfaces::interface::anycast_flag::PATH)
+        .modify_apply(|instance, args| {
+            let (area_idx, iface_idx) = args.list_entry.into_interface().unwrap();
+            let iface = &mut instance.arenas.interfaces[iface_idx];
+
+            let anycast_flag = args.dnode.get_bool();
+            iface.config.anycast_flag = anycast_flag;
+
+            let event_queue = args.event_queue;
+            event_queue.insert(Event::InterfaceFlagChange(area_idx));
+        })
+        .delete_apply(|_instance, _args| {
+            // Nothing to do.
         })
         .path(ospf::areas::area::interfaces::interface::trace_options::flag::PATH)
         .create_apply(|instance, args| {
@@ -1765,15 +1793,15 @@ where
                 }
             }
             Event::InterfaceUpdate(area_idx, iface_idx) => {
-                if let Some((instance, arenas)) = self.as_up() {
+                if let Some((mut instance, arenas)) = self.as_up() {
                     let area = &arenas.areas[area_idx];
                     let iface = &mut arenas.interfaces[iface_idx];
 
-                    iface.update(area, &instance, &mut arenas.neighbors, &arenas.lsa_entries);
+                    iface.update(area, &mut instance, &mut arenas.neighbors, &arenas.lsa_entries);
                 }
             }
             Event::InterfaceDelete(area_idx, iface_idx) => {
-                if let Some((instance, arenas)) = self.as_up() {
+                if let Some((mut instance, arenas)) = self.as_up() {
                     let area = &arenas.areas[area_idx];
                     let iface = &mut arenas.interfaces[iface_idx];
 
@@ -1784,7 +1812,7 @@ where
 
                     // Stop interface if it's active.
                     let reason = InterfaceInactiveReason::AdminDown;
-                    iface.fsm(area, &instance, &mut arenas.neighbors, &arenas.lsa_entries, ism::Event::InterfaceDown(reason));
+                    iface.fsm(area, &mut instance, &mut arenas.neighbors, &arenas.lsa_entries, ism::Event::InterfaceDown(reason));
 
                     // Update the routing table to remove nexthops that are no
                     // longer reachable.
@@ -1797,12 +1825,12 @@ where
                 area.interfaces.delete(&mut self.arenas.interfaces, iface_idx);
             }
             Event::InterfaceReset(area_idx, iface_idx) => {
-                if let Some((instance, arenas)) = self.as_up() {
+                if let Some((mut instance, arenas)) = self.as_up() {
                     let area = &arenas.areas[area_idx];
                     let iface = &mut arenas.interfaces[iface_idx];
 
                     if !iface.is_down() {
-                        iface.reset(area, &instance, &mut arenas.neighbors, &arenas.lsa_entries);
+                        iface.reset(area, &mut instance, &mut arenas.neighbors, &arenas.lsa_entries);
                     }
                 }
             }
@@ -1857,6 +1885,15 @@ where
                     });
                 }
             }
+            Event::InterfaceFlagChange(area_idx) => {
+                if let Some((instance, arenas)) = self.as_up() {
+                    let area = &arenas.areas[area_idx];
+
+                    instance.tx.protocol_input.lsa_orig_event(LsaOriginateEvent::InterfaceFlagChange {
+                        area_id: area.id,
+                    });
+                }
+            }
             Event::InterfaceSyncHelloTx(area_idx, iface_idx) => {
                 if let Some((instance, arenas)) = self.as_up() {
                     let area = &arenas.areas[area_idx];
@@ -1865,13 +1902,12 @@ where
                     iface.sync_hello_tx(area, &instance);
                 }
             }
-            Event::InterfaceUpdateAuth(area_idx, iface_idx) => {
+            Event::InterfaceUpdateAuth(_area_idx, iface_idx) => {
                 if let Some((instance, arenas)) = self.as_up() {
-                    let area = &arenas.areas[area_idx];
                     let iface = &mut arenas.interfaces[iface_idx];
 
                     // Update interface authentication keys.
-                    iface.auth_update(area, &instance);
+                    iface.auth_update(&instance);
                 }
             }
             Event::InterfaceBfdChange(iface_idx) => {
@@ -2191,6 +2227,8 @@ where
         let enabled = ospf::areas::area::interfaces::interface::enabled::DFLT;
         let cost = ospf::areas::area::interfaces::interface::cost::DFLT;
         let mtu_ignore = ospf::areas::area::interfaces::interface::mtu_ignore::DFLT;
+        let node_flag = ospf::areas::area::interfaces::interface::node_flag::DFLT;
+        let anycast_flag = ospf::areas::area::interfaces::interface::anycast_flag::DFLT;
         let bfd_enabled = ospf::areas::area::interfaces::interface::bfd::enabled::DFLT;
         let lls_enabled = ospf::areas::area::interfaces::interface::lls::DFLT;
 
@@ -2206,6 +2244,8 @@ where
             enabled,
             cost,
             mtu_ignore,
+            node_flag,
+            anycast_flag,
             static_nbrs: Default::default(),
             auth_keychain: None,
             auth_keyid: None,

@@ -135,8 +135,8 @@ impl<'a> YangList<'a, Master> for routing::ribs::rib::routes::route::Route<'a> {
         match af {
             RibAddressFamily::Ipv4 => {
                 let iter = master.rib.ip.ipv4().iter().flat_map(|(dest, routes)| {
-                    routes.values().filter(|route| !route.flags.contains(RouteFlags::REMOVED)).map(|route| {
-                        let dest = RouteDestination::new_ipv4(*dest);
+                    routes.values().filter(|route| !route.flags.contains(RouteFlags::REMOVED)).map(move |route| {
+                        let dest = RouteDestination::new_ipv4(dest);
                         ListEntry::Route(dest, route)
                     })
                 });
@@ -144,8 +144,8 @@ impl<'a> YangList<'a, Master> for routing::ribs::rib::routes::route::Route<'a> {
             }
             RibAddressFamily::Ipv6 => {
                 let iter = master.rib.ip.ipv6().iter().flat_map(|(dest, routes)| {
-                    routes.values().filter(|route| !route.flags.contains(RouteFlags::REMOVED)).map(|route| {
-                        let dest = RouteDestination::new_ipv6(*dest);
+                    routes.values().filter(|route| !route.flags.contains(RouteFlags::REMOVED)).map(move |route| {
+                        let dest = RouteDestination::new_ipv6(dest);
                         ListEntry::Route(dest, route)
                     })
                 });
@@ -175,17 +175,11 @@ impl<'a> YangList<'a, Master> for routing::ribs::rib::routes::route::Route<'a> {
             mpls_local_label: None,
             mpls_destination_prefix: dest.as_label().map(|label| label.to_yang()),
             route_context: None,
-            #[cfg(feature = "ospf")]
             ospf_metric: matches!(route.protocol, Protocol::OSPFV2 | Protocol::OSPFV3).then_some(route.metric),
-            #[cfg(feature = "ospf")]
             ospf_tag: if matches!(route.protocol, Protocol::OSPFV2 | Protocol::OSPFV3) { route.tag } else { None },
-            #[cfg(feature = "ospf")]
             ospf_route_type: route.opaque_attrs.as_ospf().map(|route_type| route_type.to_yang()),
-            #[cfg(feature = "isis")]
             isis_metric: (route.protocol == Protocol::ISIS).then_some(route.metric),
-            #[cfg(feature = "isis")]
             isis_tag: None,
-            #[cfg(feature = "isis")]
             isis_route_type: route.opaque_attrs.as_isis().map(|route_type| route_type.to_yang()),
         }
     }

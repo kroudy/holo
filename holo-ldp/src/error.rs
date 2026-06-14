@@ -6,6 +6,8 @@
 
 use std::net::{IpAddr, Ipv4Addr};
 
+use holo_utils::mpls::LabelManagerError;
+use ipnetwork::IpNetwork;
 use serde::{Deserialize, Serialize};
 use tracing::{error, warn, warn_span};
 
@@ -31,9 +33,11 @@ pub enum Error {
     TcpInvalidConnRequest(Ipv4Addr),
     TcpAdditionalTransportConn(Ipv4Addr),
     NbrPduDecodeError(Ipv4Addr, DecodeError),
-    NbrRcvdError(Ipv4Addr, StatusCode),
+    NbrRcvdError(Ipv4Addr, u32),
     NbrSentError(Ipv4Addr, StatusCode),
     NbrFsmUnexpectedEvent(Ipv4Addr, neighbor::fsm::State, neighbor::fsm::Event),
+    #[serde(skip)]
+    FecLabelAllocFailed(IpNetwork, LabelManagerError),
     InstanceStartError(Box<Error>),
     InterfaceStartError(String, Box<Error>),
 }
@@ -90,8 +94,19 @@ impl Error {
                     warn!(error = %with_source(error), "{}", self);
                 });
             }
-            Error::NbrRcvdError(lsr_id, status)
-            | Error::NbrSentError(lsr_id, status) => {
+            Error::NbrRcvdError(lsr_id, status_code) => {
+                warn_span!("neighbor", %lsr_id).in_scope(|| {
+                    // Log unknown Status Codes by their raw value.
+                    match StatusCode::decode(*status_code) {
+                        Some(status) => warn!(?status, "{}", self),
+                        None => {
+                            let status_code = format!("{status_code:#010x}");
+                            warn!(status_code, "{}", self)
+                        }
+                    }
+                });
+            }
+            Error::NbrSentError(lsr_id, status) => {
                 warn_span!("neighbor", %lsr_id).in_scope(|| {
                     warn!(?status, "{}", self);
                 });
@@ -102,6 +117,9 @@ impl Error {
                         warn!(?state, ?event, "{}", self);
                     });
                 });
+            }
+            Error::FecLabelAllocFailed(prefix, error) => {
+                warn!(%prefix, %error, "{}", self);
             }
             Error::InstanceStartError(error) => {
                 error!(error = %with_source(error), "{}", self);
@@ -152,6 +170,9 @@ impl std::fmt::Display for Error {
             }
             Error::NbrFsmUnexpectedEvent(..) => {
                 write!(f, "unexpected event")
+            }
+            Error::FecLabelAllocFailed(..) => {
+                write!(f, "failed to allocate FEC label")
             }
             Error::InstanceStartError(..) => {
                 write!(f, "failed to start instance")

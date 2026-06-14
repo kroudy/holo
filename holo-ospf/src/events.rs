@@ -29,13 +29,13 @@ use crate::lsdb::{
 use crate::neighbor::{LastDbDesc, Neighbor, RxmtPacketType, nsm};
 use crate::northbound::notification;
 use crate::packet::error::DecodeResult;
+use crate::packet::iana::PacketType;
 use crate::packet::lsa::{
     Lsa, LsaBodyVersion, LsaHdrVersion, LsaKey, LsaScope, LsaTypeVersion,
 };
 use crate::packet::{
     DbDescFlags, DbDescVersion, HelloVersion, LsAckVersion, LsRequestVersion,
     LsUpdateVersion, OptionsVersion, Packet, PacketBase, PacketHdrVersion,
-    PacketType,
 };
 use crate::version::Version;
 use crate::{gr, output, spf, tasks};
@@ -43,7 +43,7 @@ use crate::{gr, output, spf, tasks};
 // ===== Interface FSM event =====
 
 pub(crate) fn process_ism_event<V>(
-    instance: &InstanceUpView<'_, V>,
+    instance: &mut InstanceUpView<'_, V>,
     arenas: &mut InstanceArenas<V>,
     area_key: AreaKey,
     iface_key: InterfaceKey,
@@ -73,7 +73,7 @@ where
 // ===== Neighbor FSM event =====
 
 pub(crate) fn process_nsm_event<V>(
-    instance: &InstanceUpView<'_, V>,
+    instance: &mut InstanceUpView<'_, V>,
     arenas: &mut InstanceArenas<V>,
     area_key: AreaKey,
     iface_key: InterfaceKey,
@@ -299,7 +299,7 @@ where
 fn process_packet_hello<V>(
     iface: &mut Interface<V>,
     area: &Area<V>,
-    instance: &InstanceUpView<'_, V>,
+    instance: &mut InstanceUpView<'_, V>,
     neighbors: &mut Arena<Neighbor<V>>,
     lsa_entries: &Arena<LsaEntry<V>>,
     src: V::NetIpAddr,
@@ -488,7 +488,7 @@ fn process_packet_dbdesc<V>(
     nbr: &mut Neighbor<V>,
     iface: &mut Interface<V>,
     area: &Area<V>,
-    instance: &InstanceUpView<'_, V>,
+    instance: &mut InstanceUpView<'_, V>,
     lsa_entries: &Arena<LsaEntry<V>>,
     src: V::NetIpAddr,
     dbdesc: V::PacketDbDesc,
@@ -537,7 +537,7 @@ where
                 nbr.dd_seq_no = dbdesc.dd_seq_no();
             } else if !dbdesc
                 .dd_flags()
-                .contains(DbDescFlags::I | DbDescFlags::MS)
+                .intersects(DbDescFlags::I | DbDescFlags::MS)
                 && dbdesc.dd_seq_no() == nbr.dd_seq_no
                 && dbdesc.router_id() < instance.state.router_id
             {
@@ -583,7 +583,7 @@ where
             if (nbr.dd_flags.contains(DbDescFlags::MS)
                 && dbdesc.dd_seq_no() != nbr.dd_seq_no)
                 || (!nbr.dd_flags.contains(DbDescFlags::MS)
-                    && dbdesc.dd_seq_no() != nbr.dd_seq_no + 1)
+                    && dbdesc.dd_seq_no() != nbr.dd_seq_no.wrapping_add(1))
             {
                 let reason = SeqNoMismatchReason::InconsistentSeqNo;
                 let event = nsm::Event::SeqNoMismatch(reason);
@@ -670,7 +670,7 @@ where
     // Further processing depends on whether the router is master or slave.
     let mut exchange_done = false;
     if nbr.dd_flags.contains(DbDescFlags::MS) {
-        nbr.dd_seq_no += 1;
+        nbr.dd_seq_no = nbr.dd_seq_no.wrapping_add(1);
 
         if !nbr.dd_flags.contains(DbDescFlags::M)
             && !dbdesc.dd_flags().contains(DbDescFlags::M)
@@ -726,7 +726,7 @@ fn process_packet_lsreq<V>(
     nbr: &mut Neighbor<V>,
     iface: &mut Interface<V>,
     area: &Area<V>,
-    instance: &InstanceUpView<'_, V>,
+    instance: &mut InstanceUpView<'_, V>,
     lsa_entries: &Arena<LsaEntry<V>>,
     ls_req: V::PacketLsRequest,
 ) -> Result<(), Error<V>>

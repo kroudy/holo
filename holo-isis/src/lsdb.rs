@@ -20,7 +20,6 @@ use holo_utils::bier::{
 };
 use holo_utils::ip::{
     AddressFamily, Ipv4NetworkExt, Ipv6NetworkExt, JointPrefixMapExt,
-    JointPrefixSetExt,
 };
 use holo_utils::mpls::Label;
 use holo_utils::sr::{IgpAlgoType, Sid, SidLastHopBehavior, SrCfgPrefixSid};
@@ -34,7 +33,7 @@ use crate::collections::{Arena, LspEntryId};
 use crate::debug::{Debug, LspPurgeReason};
 use crate::instance::{InstanceArenas, InstanceUpView};
 use crate::interface::{Interface, InterfaceType};
-use crate::northbound::configuration::MetricType;
+use crate::northbound::configuration::{LinkAttrMode, MetricType};
 use crate::northbound::notification;
 use crate::packet::iana::{FloodingAlgo, MtId, Nlpid};
 use crate::packet::pdu::{Lsp, LspFlags, LspTlvs, Pdu};
@@ -42,6 +41,9 @@ use crate::packet::subtlvs::MsdStlv;
 use crate::packet::subtlvs::capability::{
     FloodingAlgoStlv, LabelBlockEntry, NodeAdminTagStlv, SrAlgoStlv,
     SrCapabilitiesFlags, SrCapabilitiesStlv, SrLocalBlockStlv,
+};
+use crate::packet::subtlvs::neighbor::{
+    AdminGroupStlv, AslaStlv, AslaStlvs, TeDefaultMetricStlv,
 };
 use crate::packet::subtlvs::prefix::{
     BierEncapSubStlv, BierInfoStlv, BierSubStlv, Ipv4SourceRidStlv,
@@ -55,7 +57,7 @@ use crate::packet::tlv::{
     MtCapStlvs, MtCapabilityTlv, MtFlags, MultiTopologyEntry, RouterCapFlags,
     RouterCapTlv,
 };
-use crate::packet::{LanId, LevelNumber, LevelType, LspId};
+use crate::packet::{LanId, LevelNumber, LevelType, LspId, SystemId};
 use crate::spf::{SpfType, VertexId};
 use crate::tasks::messages::input::LspPurgeMsg;
 use crate::{spf, tasks};
@@ -204,6 +206,7 @@ fn lsp_build_flags(
         lsp_flags.insert(LspFlags::IS_TYPE2);
     }
     if !instance.config.att_suppress
+        && !instance.config.overload_status
         && instance.config.level_type == LevelType::All
         && level == LevelNumber::L1
         && lsp_id.pseudonode == 0
@@ -234,6 +237,7 @@ fn lsp_build_mt_flags(
     let mut mt_flags = MtFlags::default();
 
     if !instance.config.att_suppress
+        && !instance.config.overload_status
         && instance.config.level_type == LevelType::All
         && level == LevelNumber::L1
         && instance.is_l2_attached_to_backbone(
@@ -336,8 +340,12 @@ fn lsp_build_tlvs(
     );
 
     // In an L1/L2 router, propagate L1 IP reachability to L2 for inter-area
-    // routing.
-    if level == LevelNumber::L2 && instance.config.level_type == LevelType::All
+    // routing. Skip propagation when the overload bit is set, since
+    // advertising L1 prefixes into L2 would attract transit traffic that
+    // the overload signal says we cannot forward.
+    if level == LevelNumber::L2
+        && instance.config.level_type == LevelType::All
+        && !instance.config.overload_status
     {
         lsp_propagate_l1_to_l2(
             instance,
@@ -920,6 +928,14 @@ fn lsp_build_is_reach_lan_stlvs(
         sub_tlvs.link_msd = Some(MsdStlv::from(&iface.system.msd));
     }
 
+    // Add ASLA Sub-TLV(s).
+    if matches!(
+        instance.config.link_attr_mode,
+        LinkAttrMode::AppSpecific | LinkAttrMode::Transition
+    ) {
+        lsp_build_is_reach_asla_stlvs(instance, iface, &mut sub_tlvs);
+    }
+
     sub_tlvs
 }
 
@@ -946,7 +962,52 @@ fn lsp_build_is_reach_p2p_stlvs(
         sub_tlvs.link_msd = Some(MsdStlv::from(&iface.system.msd));
     }
 
+    // Add ASLA Sub-TLV(s).
+    if matches!(
+        instance.config.link_attr_mode,
+        LinkAttrMode::AppSpecific | LinkAttrMode::Transition
+    ) {
+        lsp_build_is_reach_asla_stlvs(instance, iface, &mut sub_tlvs);
+    }
+
     sub_tlvs
+}
+
+fn lsp_build_is_reach_asla_stlvs(
+    _instance: &InstanceUpView<'_>,
+    iface: &Interface,
+    sub_tlvs: &mut IsReachStlvs,
+) {
+    // Applications that share the same set of attributes are grouped into a
+    // single ASLA sub-TLV.
+    let mut groups = BTreeMap::new();
+    for (app, asla_cfg) in &iface.config.asla {
+        let key = (asla_cfg.te_metric, asla_cfg.admin_group);
+        *groups.entry(key).or_default() |= app.sabm();
+    }
+    for ((te_metric, admin_group), sabm) in groups {
+        // Skip applications without any configured attribute.
+        if te_metric.is_none() && admin_group.is_none() {
+            continue;
+        }
+
+        let mut asla_sub_tlvs = AslaStlvs::default();
+        if let Some(metric) = te_metric {
+            asla_sub_tlvs.te_default_metric =
+                Some(TeDefaultMetricStlv::new(metric));
+        }
+        if let Some(admin_group) = admin_group {
+            asla_sub_tlvs.admin_group = Some(AdminGroupStlv::new(admin_group));
+        }
+        sub_tlvs.asla.push(AslaStlv {
+            l_flag: false,
+            sabm_length: 1,
+            sabm,
+            udabm_length: 0,
+            udabm: 0,
+            sub_tlvs: asla_sub_tlvs,
+        });
+    }
 }
 
 fn lsp_build_ipv4_reach_stlvs(
@@ -1396,6 +1457,52 @@ fn log_lsp(
     instance.state.lsp_log.truncate(LSP_LOG_MAX_SIZE);
 }
 
+// Updates the hostname database for the given System ID.
+fn update_hostname_db(
+    instance: &mut InstanceUpView<'_>,
+    lsp_entries: &Arena<LspEntry>,
+    level: LevelNumber,
+    system_id: SystemId,
+) {
+    let lsdb = instance.state.lsdb.get(level);
+
+    // Per RFC 5301, the Dynamic hostname TLV may be present in any fragment of
+    // a non-pseudonode LSP, so all fragments of the system are scanned and the
+    // hostname is taken from the first fragment that advertises one.
+    let hostname = lsdb
+        .iter_for_system_id(lsp_entries, system_id)
+        .filter(|lse| lse.data.lsp_id.pseudonode == 0)
+        .filter(|lse| lse.data.rem_lifetime != 0)
+        .find_map(|lse| lse.data.tlvs.hostname())
+        .map(|hostname| hostname.to_owned());
+
+    match hostname {
+        Some(hostname) => {
+            let mut update = false;
+            match instance.state.hostnames.entry(system_id) {
+                btree_map::Entry::Vacant(entry) => {
+                    entry.insert(hostname.clone());
+                    update = true;
+                }
+                btree_map::Entry::Occupied(mut entry) => {
+                    if *entry.get() != hostname {
+                        entry.insert(hostname.clone());
+                        update = true;
+                    }
+                }
+            }
+            if update {
+                Debug::HostnameUpdate(system_id, &hostname).log();
+            }
+        }
+        None => {
+            if instance.state.hostnames.remove(&system_id).is_some() {
+                Debug::HostnameRemove(system_id).log();
+            }
+        }
+    }
+}
+
 // ===== global functions =====
 
 // Compares which LSP is more recent.
@@ -1438,11 +1545,12 @@ pub(crate) fn install<'a>(
     if instance.config.trace_opts.lsdb {
         Debug::LspInstall(level, &lsp).log();
     }
+    let lsp_id = lsp.lsp_id;
 
     // Remove old instance of the LSP.
     let lsdb = instance.state.lsdb.get_mut(level);
     let mut old_lsp = None;
-    if let Some((lse_idx, _)) = lsdb.get_by_lspid(lsp_entries, &lsp.lsp_id) {
+    if let Some((lse_idx, _)) = lsdb.get_by_lspid(lsp_entries, &lsp_id) {
         let old_lse = lsdb.delete(lsp_entries, lse_idx);
         old_lsp = Some(old_lse.data);
     }
@@ -1465,40 +1573,13 @@ pub(crate) fn install<'a>(
     }
 
     // Add LSP entry to LSDB.
-    let (_, lse) = instance.state.lsdb.get_mut(level).insert(
+    let (lse_idx, lse) = instance.state.lsdb.get_mut(level).insert(
         lsp_entries,
         level,
         lsp,
         &instance.tx.protocol_input.lsp_purge,
     );
     let lsp = &lse.data;
-
-    // Update hostname database.
-    if lsp.lsp_id.pseudonode == 0 && lsp.lsp_id.fragment == 0 {
-        let system_id = lsp.lsp_id.system_id;
-        if let Some(hostname) = lsp.tlvs.hostname()
-            && lsp.rem_lifetime != 0
-        {
-            let mut update = false;
-            match instance.state.hostnames.entry(system_id) {
-                btree_map::Entry::Vacant(entry) => {
-                    entry.insert(hostname.to_owned());
-                    update = true;
-                }
-                btree_map::Entry::Occupied(mut entry) => {
-                    if entry.get() != hostname {
-                        entry.insert(hostname.to_owned());
-                        update = true;
-                    }
-                }
-            }
-            if update {
-                Debug::HostnameUpdate(system_id, hostname).log();
-            }
-        } else if instance.state.hostnames.remove(&system_id).is_some() {
-            Debug::HostnameRemove(system_id).log();
-        }
-    }
 
     // Start the delete timer if the LSP has expired.
     if lsp.is_expired() {
@@ -1513,7 +1594,7 @@ pub(crate) fn install<'a>(
     }
 
     // Add entry to LSP log.
-    let lsp_log_id = LspLogId::new(lsp.lsp_id, lsp.seqno);
+    let lsp_log_id = LspLogId::new(lsp_id, lsp.seqno);
     let reason = if content_change {
         LspLogReason::ContentChange
     } else {
@@ -1536,7 +1617,12 @@ pub(crate) fn install<'a>(
             .spf_delay_event(level, spf::fsm::Event::Igp);
     }
 
-    lse
+    // Update the hostname database.
+    if lsp_id.pseudonode == 0 {
+        update_hostname_db(instance, lsp_entries, level, lsp_id.system_id);
+    }
+
+    &mut lsp_entries[lse_idx]
 }
 
 pub(crate) fn lsp_originate_all(

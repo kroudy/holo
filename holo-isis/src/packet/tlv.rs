@@ -819,7 +819,8 @@ impl AuthenticationTlv {
         match self {
             AuthenticationTlv::ClearText(passwd) => {
                 buf.put_u8(AuthenticationType::ClearText as u8);
-                buf.put_slice(passwd);
+                let max_len = TLV_MAX_LEN - 1;
+                buf.put_slice(&passwd[..passwd.len().min(max_len)]);
             }
             AuthenticationTlv::HmacMd5(digest) => {
                 buf.put_u8(AuthenticationType::HmacMd5 as u8);
@@ -1971,7 +1972,8 @@ impl Ipv4ReachTlv {
             }
             let has_subtlvs = entry.sub_tlvs.prefix_attr_flags.is_some()
                 || entry.sub_tlvs.ipv4_source_rid.is_some()
-                || entry.sub_tlvs.ipv6_source_rid.is_some();
+                || entry.sub_tlvs.ipv6_source_rid.is_some()
+                || !entry.sub_tlvs.prefix_sids.is_empty();
             if has_subtlvs {
                 control |= Self::CONTROL_SUBTLVS;
             }
@@ -2284,6 +2286,7 @@ impl Ipv6ReachTlv {
             let has_subtlvs = entry.sub_tlvs.prefix_attr_flags.is_some()
                 || entry.sub_tlvs.ipv4_source_rid.is_some()
                 || entry.sub_tlvs.ipv6_source_rid.is_some()
+                || !entry.sub_tlvs.prefix_sids.is_empty()
                 || !entry.sub_tlvs.bier.is_empty();
             if has_subtlvs {
                 flags |= Self::FLAG_SUBTLVS;
@@ -2841,7 +2844,6 @@ where
             let tlv = T::from(std::mem::take(&mut tlv_entries));
             tlvs.push(tlv);
             tlv_len = 0;
-            continue;
         }
         tlv_entries.push(entry);
         tlv_len += entry_len;

@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: MIT
 //
 
+pub mod iana;
 pub mod lls;
 pub mod lsa;
 pub mod lsa_opaque;
@@ -12,55 +13,28 @@ use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
 use std::sync::atomic;
 
-use bitflags::bitflags;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use holo_utils::bytes::{BytesExt, BytesMutExt, TLS_BUF};
 use holo_utils::ip::{AddressFamily, Ipv4AddrExt};
 use internet_checksum::Checksum;
-use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
 use serde::{Deserialize, Serialize};
 
 use crate::neighbor::NeighborNetId;
+use crate::ospfv2::packet::iana::{AuthType, Options};
 use crate::ospfv2::packet::lls::LlsDataBlock;
 use crate::ospfv2::packet::lsa::{LsaHdr, LsaType};
 use crate::packet::auth::{AuthDecodeCtx, AuthEncodeCtx, AuthMethod};
 use crate::packet::error::{DecodeError, DecodeResult};
+use crate::packet::iana::PacketType;
 use crate::packet::lls::{LlsData, LlsDbDescData, LlsHelloData};
 use crate::packet::lsa::{Lsa, LsaHdrVersion, LsaKey};
 use crate::packet::{
     DbDescFlags, DbDescVersion, HelloVersion, LsAckVersion, LsRequestVersion,
     LsUpdateVersion, OptionsVersion, Packet, PacketBase, PacketHdrVersion,
-    PacketType, PacketVersion, auth, packet_encode_end, packet_encode_start,
+    PacketVersion, auth, packet_encode_end, packet_encode_start,
 };
 use crate::version::Ospfv2;
-
-// OSPFv2 Options field.
-//
-// IANA registry:
-// https://www.iana.org/assignments/ospfv2-parameters/ospfv2-parameters.xhtml#ospfv2-parameters-1
-bitflags! {
-    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-    #[derive(Deserialize, Serialize)]
-    #[serde(transparent)]
-    pub struct Options: u8 {
-        const E = 0x02;
-        const MC = 0x04;
-        const NP = 0x08;
-        const L = 0x10;
-        const DC = 0x20;
-        const O = 0x40;
-    }
-}
-
-// OSPFv2 authentication type.
-#[derive(Clone, Copy, Debug, Eq, FromPrimitive, PartialEq)]
-#[derive(Deserialize, Serialize)]
-pub enum AuthType {
-    Null = 0x00,
-    Simple = 0x01,
-    Cryptographic = 0x02,
-}
 
 //
 // OSPFv2 packet header.
@@ -733,6 +707,9 @@ impl PacketBase<Ospfv2> for LsUpdate {
         let mut lsas = vec![];
         let lsas_cnt = buf.try_get_u32()?;
         for _ in 0..lsas_cnt {
+            if buf.remaining() < LsaHdr::LENGTH as usize {
+                break;
+            }
             match Lsa::decode(af, buf) {
                 Ok(lsa) => lsas.push(lsa),
                 Err(error) => error.log(),
@@ -854,9 +831,17 @@ impl PacketVersion<Self> for Ospfv2 {
                 auth_len,
                 seqno,
             } => {
+                // Validate that the buffer is large enough to contain the
+                // authentication trailer announced by the header.
+                let trailer_end = (pkt_len as usize)
+                    .checked_add(*auth_len as usize)
+                    .ok_or(DecodeError::AuthLenError(*auth_len as u16))?;
+                if trailer_end > data.len() {
+                    return Err(DecodeError::AuthLenError(*auth_len as u16));
+                }
+
                 // Get the authentication trailer.
-                let auth_trailer = &data
-                    [pkt_len as usize..pkt_len as usize + *auth_len as usize];
+                let auth_trailer = &data[pkt_len as usize..trailer_end];
 
                 // Compute message digest.
                 let data = &data[..pkt_len as usize];

@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use bitflags::bitflags;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use derive_new::new;
-use holo_utils::bier::{BierEncapId, BiftId};
+use holo_utils::bier::{BierEncapId, BiftId, Bsl};
 use holo_utils::bytes::{BytesExt, BytesMutExt};
 use holo_utils::mpls::Label;
 use holo_utils::sr::{IgpAlgoType, Sid};
@@ -18,28 +18,10 @@ use num_traits::{FromPrimitive, ToPrimitive};
 use serde::{Deserialize, Serialize};
 
 use crate::packet::error::{DecodeError, DecodeResult};
+use crate::packet::iana::{RouterFuncCaps, RouterInfoCaps, RouterInfoTlvType};
 
 // TLV header size.
 pub const TLV_HDR_SIZE: u16 = 4;
-
-// OSPF Router Information (RI) TLV types.
-//
-// IANA registry:
-// https://www.iana.org/assignments/ospf-parameters/ospf-parameters.xhtml#ri-tlv
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-#[derive(FromPrimitive, ToPrimitive)]
-#[derive(Deserialize, Serialize)]
-pub enum RouterInfoTlvType {
-    InformationalCaps = 1,
-    FunctionalCaps = 2,
-    DynamicHostname = 7,
-    SrAlgo = 8,
-    SidLabelRange = 9,
-    NodeAdminTag = 10,
-    NodeMsd = 12,
-    SrLocalBlock = 14,
-    SrmsPref = 15,
-}
 
 // SID/Label Sub-TLV type.
 //
@@ -47,24 +29,6 @@ pub enum RouterInfoTlvType {
 // Sub-TLV registry of their own. Regardless of that, its type value is always
 // the same.
 const SUBTLV_SID_LABEL: u16 = 1;
-
-// OSPF Router Informational Capability Bits.
-//
-// IANA registry:
-// https://www.iana.org/assignments/ospf-parameters/ospf-parameters.xhtml#router-informational-capability
-bitflags! {
-    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-    #[derive(Deserialize, Serialize)]
-    #[serde(transparent)]
-    pub struct RouterInfoCaps: u32 {
-        const GR = 1 << 31;
-        const GR_HELPER = 1 << 30;
-        const STUB_ROUTER = 1 << 29;
-        const TE = 1 << 28;
-        const P2P_LAN = 1 << 27;
-        const EXPERIMENTAL_TE = 1 << 26;
-    }
-}
 
 //
 // OSPF Router Informational Capabilities TLV.
@@ -82,18 +46,6 @@ bitflags! {
 #[derive(Clone, Debug, Default, Eq, new, PartialEq)]
 #[derive(Deserialize, Serialize)]
 pub struct RouterInfoCapsTlv(RouterInfoCaps);
-
-// OSPF Router Functional Capability Bits.
-//
-// IANA registry:
-// https://www.iana.org/assignments/ospf-parameters/ospf-parameters.xhtml#router-functional-capability
-bitflags! {
-    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-    #[derive(Deserialize, Serialize)]
-    #[serde(transparent)]
-    pub struct RouterFuncCaps: u32 {
-    }
-}
 
 //
 // OSPF Router Functional Capabilities TLV.
@@ -382,7 +334,7 @@ pub struct BierStlv {
 pub struct BierEncapSubStlv {
     pub max_si: u8,
     pub id: BierEncapId,
-    pub bs_len: u8,
+    pub bs_len: Bsl,
 }
 
 #[derive(FromPrimitive, ToPrimitive)]
@@ -434,21 +386,26 @@ impl BierStlv {
                         | BierStlvType::NonMplsEncap => {
                             let max_si = buf_stlv.try_get_u8()?;
                             let id = buf_stlv.try_get_u24()?;
-                            let bs_len = (buf_stlv.try_get_u8()? & 0xf0) >> 4;
+                            let bs_len_raw =
+                                (buf_stlv.try_get_u8()? & 0xf0) >> 4;
 
-                            let id = match stlv_type {
-                                BierStlvType::MplsEncap => BierEncapId::Mpls(
-                                    Label::new(id & Label::VALUE_MASK),
-                                ),
-                                BierStlvType::NonMplsEncap => {
-                                    BierEncapId::NonMpls(BiftId::new(id))
-                                }
-                            };
-                            encaps.push(BierEncapSubStlv {
-                                max_si,
-                                id,
-                                bs_len,
-                            });
+                            if let Ok(bs_len) = Bsl::try_from(bs_len_raw) {
+                                let id = match stlv_type {
+                                    BierStlvType::MplsEncap => {
+                                        BierEncapId::Mpls(Label::new(
+                                            id & Label::VALUE_MASK,
+                                        ))
+                                    }
+                                    BierStlvType::NonMplsEncap => {
+                                        BierEncapId::NonMpls(BiftId::new(id))
+                                    }
+                                };
+                                encaps.push(BierEncapSubStlv {
+                                    max_si,
+                                    id,
+                                    bs_len,
+                                });
+                            }
                         }
                     };
                 }
@@ -490,7 +447,7 @@ impl BierStlv {
             let start_pos = tlv_encode_start(buf, encap_type);
             buf.put_u8(encap.max_si);
             buf.put_u24(encap.id.clone().get());
-            buf.put_u8((encap.bs_len << 4) & 0xf0);
+            buf.put_u8((u8::from(encap.bs_len) << 4) & 0xf0);
             buf.put_u24(0);
             tlv_encode_end(buf, start_pos);
         }
@@ -666,6 +623,9 @@ impl SidLabelRangeTlv {
         let mut first = None;
 
         let range = buf.try_get_u24()?;
+        if range == 0 {
+            return Err(DecodeError::ZeroLabelRangeRange);
+        }
         let _reserved = buf.try_get_u8()?;
 
         // Parse Sub-TLVs.
@@ -705,7 +665,23 @@ impl SidLabelRangeTlv {
         }
 
         match first {
-            Some(first) => Ok(SidLabelRangeTlv { first, range }),
+            Some(first) => {
+                // Sanity checks.
+                if let Sid::Label(label) = &first {
+                    if label.is_reserved() {
+                        return Err(DecodeError::LabelRangeReservedFirstLabel(
+                            *label,
+                        ));
+                    }
+                    let last = label.get().saturating_add(range - 1);
+                    if last > *Label::UNRESERVED_RANGE.end() {
+                        return Err(DecodeError::LabelRangeRangeOverflow(
+                            *label, range,
+                        ));
+                    }
+                }
+                Ok(SidLabelRangeTlv { first, range })
+            }
             None => Err(DecodeError::MissingRequiredTlv(SUBTLV_SID_LABEL)),
         }
     }
@@ -736,6 +712,9 @@ impl SrLocalBlockTlv {
     pub(crate) fn decode(_tlv_len: u16, buf: &mut Bytes) -> DecodeResult<Self> {
         let mut first = None;
         let range = buf.try_get_u24()?;
+        if range == 0 {
+            return Err(DecodeError::ZeroLabelRangeRange);
+        }
         let _reserved = buf.try_get_u8()?;
 
         // Parse Sub-TLVs.
@@ -775,7 +754,23 @@ impl SrLocalBlockTlv {
         }
 
         match first {
-            Some(first) => Ok(SrLocalBlockTlv { first, range }),
+            Some(first) => {
+                // Sanity checks.
+                if let Sid::Label(label) = &first {
+                    if label.is_reserved() {
+                        return Err(DecodeError::LabelRangeReservedFirstLabel(
+                            *label,
+                        ));
+                    }
+                    let last = label.get().saturating_add(range - 1);
+                    if last > *Label::UNRESERVED_RANGE.end() {
+                        return Err(DecodeError::LabelRangeRangeOverflow(
+                            *label, range,
+                        ));
+                    }
+                }
+                Ok(SrLocalBlockTlv { first, range })
+            }
             None => Err(DecodeError::MissingRequiredTlv(SUBTLV_SID_LABEL)),
         }
     }
@@ -918,6 +913,7 @@ impl SrmsPrefTlv {
         }
 
         let pref = buf.try_get_u8()?;
+        let _reserved = buf.try_get_u24()?;
 
         Ok(SrmsPrefTlv(pref))
     }
@@ -925,6 +921,8 @@ impl SrmsPrefTlv {
     pub(crate) fn encode(&self, buf: &mut BytesMut) {
         let start_pos = tlv_encode_start(buf, RouterInfoTlvType::SrmsPref);
         buf.put_u8(self.0);
+        let reserved = 0;
+        buf.put_u24(reserved);
         tlv_encode_end(buf, start_pos);
     }
 

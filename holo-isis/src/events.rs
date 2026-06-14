@@ -447,7 +447,7 @@ fn process_pdu_hello_p2p(
 
     // Process existing or new adjacency.
     let mut adj = match iface.state.p2p_adjacency.take() {
-        Some(adj) => {
+        Some(mut adj) => {
             // Determine if the PDU can be accepted based on area match and
             // level usage.
             let accept = match (area_match, adj.level_usage) {
@@ -459,11 +459,23 @@ fn process_pdu_hello_p2p(
                 _ => false,
             };
             if !accept {
+                adj.state_change(
+                    iface,
+                    instance,
+                    AdjacencyEvent::Kill,
+                    AdjacencyState::Down,
+                );
                 return Err(AdjacencyRejectError::WrongSystem.into());
             }
 
             // Reject PDU if the System-ID doesn't match (see IS-IS 8.2.5.2.d).
             if adj.system_id != hello.source {
+                adj.state_change(
+                    iface,
+                    instance,
+                    AdjacencyEvent::Kill,
+                    AdjacencyState::Down,
+                );
                 return Err(AdjacencyRejectError::WrongSystem.into());
             }
             adj
@@ -480,12 +492,11 @@ fn process_pdu_hello_p2p(
                         .intersection(hello.circuit_type)
                 }
                 false => {
-                    // Non-matching area: only accept L2 circuit type.
-                    if hello.circuit_type != LevelType::L1 {
-                        Some(LevelType::L2)
-                    } else {
-                        None
-                    }
+                    // Non-matching area: only L2 is allowed, and only if
+                    // the interface is configured for L2.
+                    (iface.config.level_type.resolved.intersects(LevelType::L2)
+                        && hello.circuit_type.intersects(LevelType::L2))
+                    .then_some(LevelType::L2)
                 }
             }) else {
                 return Err(AdjacencyRejectError::WrongSystem.into());
@@ -546,6 +557,12 @@ fn process_pdu_hello_p2p(
                 adj.three_way_state = new_state;
                 match new_state {
                     ThreeWayAdjState::Down => {
+                        adj.state_change(
+                            iface,
+                            instance,
+                            AdjacencyEvent::HelloOneWayRcvd,
+                            AdjacencyState::Down,
+                        );
                         return Ok(());
                     }
                     ThreeWayAdjState::Initializing => {
@@ -754,9 +771,12 @@ fn process_pdu_lsp(
             // received.
             lsp.rcvd_rem_lifetime = Some(lsp.rem_lifetime);
 
-            // RFC 7987: If the LSP is not expired, reset its Remaining Lifetime
-            // to the configured maximum to protect against corrupted values.
-            if !lsp.is_expired() {
+            // RFC 7987: If the LSP is not expired and its Remaining Lifetime
+            // is less than the configured maximum, reset it to the configured
+            // maximum to protect against corrupted values.
+            if !lsp.is_expired()
+                && lsp.rem_lifetime < instance.config.lsp_lifetime
+            {
                 lsp.rem_lifetime = instance.config.lsp_lifetime;
             }
 
@@ -1072,7 +1092,9 @@ fn process_pdu_snp(
     // Complete Sequence Numbers PDU processing.
     //
     // Flood LSPs we have that the neighbor doesn't.
-    if let Some((start, end)) = snp.summary {
+    if let Some((start, end)) = snp.summary
+        && start <= end
+    {
         let lsdb = instance.state.lsdb.get(level);
         for lsp in lsdb
             .range(&arenas.lsp_entries, start..=end)

@@ -19,17 +19,19 @@ use crate::area::Area;
 use crate::collections::{Arena, NeighborId};
 use crate::debug::Debug;
 use crate::error::Error;
+use crate::gr::GrExitReason;
 use crate::instance::InstanceUpView;
 use crate::interface::{Interface, InterfaceType, ism};
 use crate::lsdb::{LsaEntry, LsaOriginateEvent};
 use crate::northbound::notification;
+use crate::packet::iana::PacketType;
 use crate::packet::lsa::{Lsa, LsaHdrVersion, LsaKey};
 use crate::packet::tlv::GrReason;
-use crate::packet::{DbDescFlags, DbDescVersion, PacketType};
+use crate::packet::{DbDescFlags, DbDescVersion};
 use crate::tasks::messages::input::RxmtIntervalMsg;
 use crate::tasks::messages::output::NetTxPacketMsg;
 use crate::version::Version;
-use crate::{output, sr, tasks};
+use crate::{gr, output, sr, tasks};
 
 #[derive(Debug)]
 pub struct Neighbor<V: Version> {
@@ -206,7 +208,7 @@ where
         &mut self,
         iface: &mut Interface<V>,
         area: &Area<V>,
-        instance: &InstanceUpView<'_, V>,
+        instance: &mut InstanceUpView<'_, V>,
         lsa_entries: &Arena<LsaEntry<V>>,
         event: Event,
     ) {
@@ -243,7 +245,7 @@ where
             (State::Init, Event::TwoWayRcvd)
             | (State::TwoWay, Event::AdjOk) => {
                 if iface.need_adjacency(self) {
-                    self.dd_seq_no += 1;
+                    self.dd_seq_no = self.dd_seq_no.wrapping_add(1);
                     self.dd_flags.insert(
                         DbDescFlags::I | DbDescFlags::M | DbDescFlags::MS,
                     );
@@ -320,7 +322,7 @@ where
                 Event::SeqNoMismatch(_) | Event::BadLsReq,
             ) => {
                 self.reset_adjacency();
-                self.dd_seq_no += 1;
+                self.dd_seq_no = self.dd_seq_no.wrapping_add(1);
                 self.dd_flags
                     .insert(DbDescFlags::I | DbDescFlags::M | DbDescFlags::MS);
                 output::send_dbdesc(self, iface, area, instance);
@@ -353,7 +355,6 @@ where
                 Event::OneWayRcvd,
             ) => {
                 self.reset_adjacency();
-                self.tasks.inactivity_timer = None;
 
                 // If we're acting as a graceful restart helper for the
                 // neighbor, do not change its state once the 1-Way event is
@@ -405,10 +406,21 @@ where
         &mut self,
         iface: &mut Interface<V>,
         area: &Area<V>,
-        instance: &InstanceUpView<'_, V>,
+        instance: &mut InstanceUpView<'_, V>,
         event: Event,
         new_state: State,
     ) {
+        // Exit GR helper mode if active.
+        if new_state == State::Down && self.gr.is_some() {
+            gr::helper_exit(
+                self,
+                iface,
+                area,
+                GrExitReason::TopologyChanged,
+                instance,
+            );
+        }
+
         // Check for bidirectional communication change.
         if new_state >= State::TwoWay && self.state < State::TwoWay
             || new_state < State::TwoWay && self.state >= State::TwoWay

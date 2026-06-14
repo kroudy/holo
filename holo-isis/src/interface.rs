@@ -12,14 +12,12 @@ use std::sync::Arc;
 use std::sync::atomic::{self, AtomicU32};
 
 use chrono::{DateTime, Utc};
-use holo_utils::ip::{AddressFamily, JointPrefixSetExt};
+use holo_utils::ip::{AddrList, AddressFamily};
 use holo_utils::mac_addr::MacAddr;
 use holo_utils::socket::{AsyncFd, Socket, SocketExt};
 use holo_utils::southbound::InterfaceFlags;
 use holo_utils::sr::MsdType;
 use holo_utils::task::{IntervalTask, Task, TimeoutTask};
-use ipnetwork::IpNetwork;
-use prefix_trie::joint::set::JointPrefixSet;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -58,7 +56,7 @@ pub struct InterfaceSys {
     pub mtu: Option<u32>,
     pub msd: BTreeMap<MsdType, u8>,
     pub mac_addr: Option<MacAddr>,
-    pub addr_list: JointPrefixSet<IpNetwork>,
+    pub addr_list: AddrList,
 }
 
 #[derive(Debug, Default)]
@@ -886,9 +884,8 @@ impl InterfaceNet {
         let hello_padding = iface.config.hello_padding.then_some(
             std::cmp::max(iface.iso_mtu() as u16, instance.config.lsp_mtu),
         );
-        let keychains = &instance.shared.keychains;
-        let hello_auth = iface.config.hello_auth.all.method(keychains);
-        let global_auth = instance.config.auth.all.method(keychains);
+        let hello_auth = iface.config.hello_auth_resolved.clone();
+        let global_auth = instance.config.auth_resolved.clone();
         let trace_opts = iface.config.trace_opts.packets_resolved.clone();
         let (net_tx_pdup, net_tx_pduc) = mpsc::unbounded_channel();
         let mut net_tx_task = tasks::net_tx(

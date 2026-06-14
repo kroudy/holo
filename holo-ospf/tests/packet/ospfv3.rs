@@ -10,16 +10,19 @@ use std::sync::{Arc, LazyLock as Lazy};
 
 use bytes::Bytes;
 use const_addrs::{ip, ip4, net};
+use holo_ospf::ospfv3::packet::iana::*;
 use holo_ospf::ospfv3::packet::lsa::*;
 use holo_ospf::ospfv3::packet::*;
 use holo_ospf::packet::auth::{AuthDecodeCtx, AuthEncodeCtx, AuthMethod};
+use holo_ospf::packet::error::DecodeError;
+use holo_ospf::packet::iana::*;
 use holo_ospf::packet::lls::ExtendedOptionsFlags;
 use holo_ospf::packet::lsa::{Lsa, LsaKey};
 use holo_ospf::packet::tlv::*;
-use holo_ospf::packet::{DbDescFlags, Packet, PacketType};
+use holo_ospf::packet::{DbDescFlags, Packet};
 use holo_ospf::version::Ospfv3;
 use holo_protocol::assert_eq_hex;
-use holo_utils::bier::{BierEncapId, BiftId};
+use holo_utils::bier::{BierEncapId, BiftId, Bsl};
 use holo_utils::crypto::CryptoAlgo;
 use holo_utils::ip::AddressFamily;
 use holo_utils::keychain::Key;
@@ -1276,7 +1279,7 @@ static EXT_INTRA_AREA_PREFIX_LSA_BIER_TLV: Lazy<(Vec<u8>, Lsa<Ospfv3>)> =
                             encaps: vec![BierEncapSubStlv {
                                 max_si: 128,
                                 id: BierEncapId::NonMpls(BiftId::new(0)),
-                                bs_len: 3,
+                                bs_len: Bsl::_256,
                             }],
                             unknown_sstlvs: vec![],
                         }],
@@ -1661,4 +1664,22 @@ fn test_encode_grace_lsa1() {
 fn test_decode_grace_lsa1() {
     let (ref bytes, ref lsa) = *GRACE_LSA1;
     test_decode_lsa(bytes, lsa, AddressFamily::Ipv4);
+}
+
+#[test]
+fn test_decode_invalid_lls_length() {
+    let (ref bytes, ref auth_data, _) = *HELLO1_HMAC_SHA1_LLS;
+
+    // Zero out the LLS Data Length field.
+    let mut bytes = bytes.clone();
+    bytes[42] = 0x00;
+    bytes[43] = 0x00;
+
+    let (auth_key, _) = auth_data.as_ref().unwrap();
+    let auth_method = AuthMethod::ManualKey(auth_key.clone());
+    let auth = Some(AuthDecodeCtx::new(&auth_method, SRC_ADDR.into()));
+
+    let mut buf = Bytes::copy_from_slice(&bytes);
+    let result = Packet::<Ospfv3>::decode(AddressFamily::Ipv6, &mut buf, auth);
+    assert_eq!(result.unwrap_err(), DecodeError::InvalidLength(44));
 }

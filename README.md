@@ -233,6 +233,7 @@ Holo supports the following Internet Standards:
 * RFC 8476 - Signaling Maximum SID Depth (MSD) Using OSPF
 * RFC 8665 - OSPF Extensions for Segment Routing
 * RFC 8666 - OSPFv3 Extensions for Segment Routing
+* RFC 9983 - OSPFv2 Anycast Property Advertisement
 * draft-ietf-bier-ospfv3-extensions-07 - OSPFv3 Extensions for BIER
 * draft-ietf-bier-lsr-non-mpls-extensions-03 - LSR Extensions for BIER non-MPLS Encapsulation
 
@@ -268,13 +269,14 @@ Results from conformance testing performed with the Ixia IxANVL RFC Compliance T
 | ietf-ip@2018-02-22 | 52.17% | 0.00% | - | - | [40.00%](https://holo-routing.github.io/ietf-yang-coverage/ietf-ip@2018-02-22.html) |
 | ietf-ipv4-unicast-routing@2018-03-13 | 100.00% | 100.00% | - | - | [100.00%](https://holo-routing.github.io/ietf-yang-coverage/ietf-ipv4-unicast-routing@2018-03-13.html) |
 | ietf-ipv6-unicast-routing@2018-03-13 | 40.62% | 100.00% | - | - | [45.71%](https://holo-routing.github.io/ietf-yang-coverage/ietf-ipv6-unicast-routing@2018-03-13.html) |
-| ietf-isis-link-attr@2025-09-11 | 0.00% | 51.85% | - | - | [43.75%](https://holo-routing.github.io/ietf-yang-coverage/ietf-isis-link-attr@2025-09-11.html) |
+| ietf-isis-link-attr@2026-04-30 | 81.82% | 77.06% | - | - | [77.50%](https://holo-routing.github.io/ietf-yang-coverage/ietf-isis-link-attr@2026-04-30.html) |
 | ietf-isis-msd@2024-09-02 | - | 100.00% | - | - | [100.00%](https://holo-routing.github.io/ietf-yang-coverage/ietf-isis-msd@2024-09-02.html) |
 | ietf-isis-sr-mpls@2025-12-09 | 15.38% | 57.27% | - | - | [52.85%](https://holo-routing.github.io/ietf-yang-coverage/ietf-isis-sr-mpls@2025-12-09.html) |
 | ietf-isis@2022-10-19 | 93.62% | 80.09% | 100.00% | 100.00% | [86.77%](https://holo-routing.github.io/ietf-yang-coverage/ietf-isis@2022-10-19.html) |
 | ietf-key-chain@2017-06-15 | 100.00% | 100.00% | - | - | [100.00%](https://holo-routing.github.io/ietf-yang-coverage/ietf-key-chain@2017-06-15.html) |
 | ietf-mpls-ldp@2022-03-14 | 86.96% | 92.31% | 100.00% | 100.00% | [92.38%](https://holo-routing.github.io/ietf-yang-coverage/ietf-mpls-ldp@2022-03-14.html) |
 | ietf-mpls@2020-12-18 | 0.00% | 57.14% | - | - | [35.29%](https://holo-routing.github.io/ietf-yang-coverage/ietf-mpls@2020-12-18.html) |
+| ietf-ospf-anycast-flag@2026-05-19 | 100.00% | - | - | - | [100.00%](https://holo-routing.github.io/ietf-yang-coverage/ietf-ospf-anycast-flag@2026-05-19.html) |
 | ietf-ospf-sr-mpls@2025-12-09 | 21.43% | 51.36% | - | - | [49.82%](https://holo-routing.github.io/ietf-yang-coverage/ietf-ospf-sr-mpls@2025-12-09.html) |
 | ietf-ospf@2022-10-19 | 95.70% | 85.04% | 100.00% | 58.06% | [83.89%](https://holo-routing.github.io/ietf-yang-coverage/ietf-ospf@2022-10-19.html) |
 | ietf-ospfv3-extended-lsa@2024-06-07 | 50.00% | 85.28% | - | - | [84.85%](https://holo-routing.github.io/ietf-yang-coverage/ietf-ospfv3-extended-lsa@2024-06-07.html) |

@@ -18,9 +18,11 @@ use crate::interface::{self, Interface, InterfaceSys, InterfaceVersion};
 use crate::neighbor::Neighbor;
 use crate::network::{MulticastAddr, NetworkVersion};
 use crate::ospfv3;
-use crate::ospfv3::packet::{Hello, Options, PacketHdr};
+use crate::ospfv3::packet::iana::Options;
+use crate::ospfv3::packet::{Hello, PacketHdr};
+use crate::packet::Packet;
 use crate::packet::auth::AuthMethod;
-use crate::packet::{Packet, PacketType};
+use crate::packet::iana::PacketType;
 use crate::version::Ospfv3;
 
 // ===== impl Ospfv3 =====
@@ -79,7 +81,7 @@ impl InterfaceVersion<Self> for Ospfv3 {
                 area,
                 OptionsLocation::new_packet(
                     PacketType::Hello,
-                    iface.state.auth.is_some(),
+                    iface.state.auth.load().is_some(),
                     lls.is_some(),
                 ),
             ),
@@ -172,7 +174,8 @@ impl InterfaceVersion<Self> for Ospfv3 {
 
         // Reserve space for the authentication trailer when authentication is
         // enabled.
-        if let Some(auth) = &iface.state.auth {
+        let auth_guard = iface.state.auth.load();
+        if let Some(auth) = auth_guard.as_ref() {
             max -= ospfv3::packet::AUTH_TRAILER_HDR_SIZE;
             match auth {
                 AuthMethod::ManualKey(key) => {

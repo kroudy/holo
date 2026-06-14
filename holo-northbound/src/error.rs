@@ -16,7 +16,9 @@ pub enum Error {
     RpcNotFound,
     RpcRelay(RpcError),
     RpcCallback(RpcError),
+    RelayUnreachable,
     YangInvalidPath(yang5::Error),
+    YangInvalidListKeys,
     YangInvalidData(yang5::Error),
 }
 
@@ -38,9 +40,11 @@ impl Error {
             Error::RpcCallback(error) => {
                 warn!(%error, "{}", self);
             }
+            Error::RelayUnreachable => warn!("{}", self),
             Error::YangInvalidPath(error) => {
                 warn!(%error, "{}", self);
             }
+            Error::YangInvalidListKeys => warn!("{}", self),
             Error::YangInvalidData(error) => {
                 warn!(%error, "{}", self);
             }
@@ -64,8 +68,17 @@ impl std::fmt::Display for Error {
             Error::RpcCallback(..) => {
                 write!(f, "RPC callback failed")
             }
+            Error::RelayUnreachable => {
+                write!(
+                    f,
+                    "failed to relay request: the target instance is no longer running"
+                )
+            }
             Error::YangInvalidPath(..) => {
                 write!(f, "Invalid YANG data path")
+            }
+            Error::YangInvalidListKeys => {
+                write!(f, "Invalid YANG list keys")
             }
             Error::YangInvalidData(..) => {
                 write!(f, "Invalid YANG instance data")

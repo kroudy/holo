@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: MIT
 //
 
+pub mod iana;
 pub mod lls;
 pub mod lsa;
 
@@ -11,7 +12,6 @@ use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
 use std::sync::atomic;
 
-use bitflags::bitflags;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use holo_utils::bytes::{BytesExt, BytesMutExt, TLS_BUF};
 use holo_utils::crypto::CryptoProtocolId;
@@ -22,37 +22,19 @@ use num_traits::FromPrimitive;
 use serde::{Deserialize, Serialize};
 
 use crate::neighbor::NeighborNetId;
+use crate::ospfv3::packet::iana::Options;
 use crate::ospfv3::packet::lsa::{LsaHdr, LsaType};
 use crate::packet::auth::{AuthDecodeCtx, AuthEncodeCtx, AuthMethod};
 use crate::packet::error::{DecodeError, DecodeResult};
+use crate::packet::iana::PacketType;
 use crate::packet::lls::{LLS_HDR_SIZE, LlsData, LlsDbDescData, LlsHelloData};
 use crate::packet::lsa::{Lsa, LsaHdrVersion, LsaKey};
 use crate::packet::{
     DbDescFlags, DbDescVersion, HelloVersion, LsAckVersion, LsRequestVersion,
     LsUpdateVersion, OptionsVersion, Packet, PacketBase, PacketHdrVersion,
-    PacketType, PacketVersion, auth, packet_encode_end, packet_encode_start,
+    PacketVersion, auth, packet_encode_end, packet_encode_start,
 };
 use crate::version::Ospfv3;
-
-// OSPFv3 Options field.
-//
-// IANA registry:
-// https://www.iana.org/assignments/ospfv3-parameters/ospfv3-parameters.xhtml#ospfv3-parameters-1
-bitflags! {
-    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-    #[derive(Deserialize, Serialize)]
-    #[serde(transparent)]
-    pub struct Options: u16 {
-        const V6 = 0x0001;
-        const E = 0x0002;
-        const N = 0x0008;
-        const R = 0x0010;
-        const DC = 0x0020;
-        const AF = 0x0100;
-        const L = 0x0200;
-        const AT = 0x0400;
-    }
-}
 
 // OSPFv3 authentication type.
 #[derive(Clone, Copy, Debug, Eq, FromPrimitive, PartialEq)]
@@ -705,6 +687,9 @@ impl PacketBase<Ospfv3> for LsUpdate {
         let mut lsas = vec![];
         let lsas_cnt = buf.try_get_u32()?;
         for _ in 0..lsas_cnt {
+            if buf.remaining() < LsaHdr::LENGTH as usize {
+                break;
+            }
             match Lsa::decode(af, buf) {
                 Ok(lsa) => lsas.push(lsa),
                 Err(error) => error.log(),
@@ -846,9 +831,14 @@ impl PacketVersion<Self> for Ospfv3 {
                 return Err(DecodeError::InvalidLength(buf.len() as u16));
             }
             let _lls_cksum = buf.try_get_u16()?;
-            let lls_block_len = buf.try_get_u16()?;
-            let lls_block_len =
-                lls_block_len as usize * 4 - LLS_HDR_SIZE as usize;
+            // RFC 5613 Section 2.2: the LLS Data Length field measures the
+            // entire LLS block (including the 4-byte header) in 32-bit words,
+            // so it must be at least 1.
+            let lls_len = buf.try_get_u16()? as usize * 4;
+            if lls_len < LLS_HDR_SIZE as usize {
+                return Err(DecodeError::InvalidLength(buf.len() as u16));
+            }
+            let lls_block_len = lls_len - LLS_HDR_SIZE as usize;
             if buf.remaining() < lls_block_len {
                 return Err(DecodeError::InvalidLength(buf.len() as u16));
             }

@@ -43,6 +43,8 @@ static YANG_EMBEDDED_MODULES: Lazy<EmbeddedModules> = Lazy::new(|| {
             include_str!("../modules/ietf/iana-crypt-hash@2014-08-06.yang"),
         EmbeddedModuleKey::new("iana-if-type", Some("2017-01-19"), None, None) =>
             include_str!("../modules/ietf/iana-if-type@2017-01-19.yang"),
+        EmbeddedModuleKey::new("iana-igp-link-attr-apps", Some("2026-04-14"), None, None) =>
+            include_str!("../modules/ietf/iana-igp-link-attr-apps@2026-04-14.yang"),
         EmbeddedModuleKey::new("iana-msd-types", Some("2025-01-10"), None, None) =>
             include_str!("../modules/ietf/iana-msd-types@2025-01-10.yang"),
         EmbeddedModuleKey::new("iana-routing-types", Some("2018-10-29"), None, None) =>
@@ -99,8 +101,8 @@ static YANG_EMBEDDED_MODULES: Lazy<EmbeddedModules> = Lazy::new(|| {
             include_str!("../modules/ietf/ietf-ipv6-router-advertisements@2018-03-13.yang"),
         EmbeddedModuleKey::new("ietf-isis", Some("2022-10-19"), None, None) =>
             include_str!("../modules/ietf/ietf-isis@2022-10-19.yang"),
-        EmbeddedModuleKey::new("ietf-isis-link-attr", Some("2025-09-11"), None, None) =>
-            include_str!("../modules/ietf/ietf-isis-link-attr@2025-09-11.yang"),
+        EmbeddedModuleKey::new("ietf-isis-link-attr", Some("2026-04-30"), None, None) =>
+            include_str!("../modules/ietf/ietf-isis-link-attr@2026-04-30.yang"),
         EmbeddedModuleKey::new("ietf-isis-msd", Some("2024-09-02"), None, None) =>
             include_str!("../modules/ietf/ietf-isis-msd@2024-09-02.yang"),
         EmbeddedModuleKey::new("ietf-isis-sr-mpls", Some("2025-12-09"), None, None) =>
@@ -117,6 +119,8 @@ static YANG_EMBEDDED_MODULES: Lazy<EmbeddedModules> = Lazy::new(|| {
             include_str!("../modules/ietf/ietf-netconf-acm@2018-02-14.yang"),
         EmbeddedModuleKey::new("ietf-ospf", Some("2022-10-19"), None, None) =>
             include_str!("../modules/ietf/ietf-ospf@2022-10-19.yang"),
+        EmbeddedModuleKey::new("ietf-ospf-anycast-flag", Some("2026-05-19"), None, None) =>
+            include_str!("../modules/ietf/ietf-ospf-anycast-flag@2026-05-19.yang"),
         EmbeddedModuleKey::new("ietf-ospf-sr-mpls", Some("2025-12-09"), None, None) =>
             include_str!("../modules/ietf/ietf-ospf-sr-mpls@2025-12-09.yang"),
         EmbeddedModuleKey::new("ietf-ospfv3-extended-lsa", Some("2024-06-07"), None, None) =>
@@ -256,6 +260,7 @@ pub mod implemented_modules {
     ];
     pub const ISIS: &[&str] = &[
         // IETF modules
+        "iana-igp-link-attr-apps",
         "ietf-bfd-types",
         "ietf-isis",
         "ietf-isis-link-attr",
@@ -280,6 +285,7 @@ pub mod implemented_modules {
         // IETF modules
         "ietf-bfd-types",
         "ietf-ospf",
+        "ietf-ospf-anycast-flag",
         "ietf-ospf-sr-mpls",
         "ietf-ospfv3-extended-lsa",
         "ietf-segment-routing-mpls",
@@ -406,6 +412,7 @@ pub static YANG_FEATURES: Lazy<HashMap<&'static str, Vec<&'static str>>> =
                 "lls",
                 "max-ecmp",
                 "mtu-ignore",
+                "node-flag",
                 "node-tag",
                 "ospfv3-authentication-trailer",
                 "stub-router",

@@ -222,9 +222,11 @@ impl Instance {
 
         // Start interfaces.
         for iface in arenas.interfaces.iter_mut() {
-            iface
-                .update(&mut instance, &mut arenas.adjacencies)
-                .unwrap();
+            if let Err(error) =
+                iface.update(&mut instance, &mut arenas.adjacencies)
+            {
+                error.log();
+            }
         }
 
         // Schedule initial LSP origination.
@@ -702,7 +704,7 @@ fn process_ibus_msg(
         }
         // BIER configuration update.
         IbusMsg::BierCfgUpd(bier_config) => {
-            instance.shared.bier_config = bier_config;
+            ibus::rx::process_bier_cfg_update(instance, bier_config);
         }
         // Ignore other events.
         _ => {}

@@ -28,20 +28,23 @@ use crate::instance::{InstanceArenas, InstanceUpView};
 use crate::interface::{Interface, InterfaceType, ism};
 use crate::lsdb::{self, LsaOriginateEvent, LsdbVersion, MAX_LINK_METRIC};
 use crate::neighbor::nsm;
-use crate::ospfv3::packet::Options;
-use crate::ospfv3::packet::lsa::{
-    LsaBody, LsaFunctionCode, LsaHdr, LsaInterAreaPrefix, LsaInterAreaRouter,
-    LsaIntraAreaPrefix, LsaIntraAreaPrefixEntry, LsaLink, LsaLinkPrefix,
-    LsaNetwork, LsaRouter, LsaRouterFlags, LsaRouterInfo, LsaRouterLink,
-    LsaRouterLinkType, LsaScopeCode, LsaType, PrefixOptions, PrefixSid,
+use crate::ospfv3::packet::iana::{
+    LsaFunctionCode, LsaRouterFlags, LsaRouterLinkType, Options, PrefixOptions,
 };
+use crate::ospfv3::packet::lsa::{
+    LsaBody, LsaHdr, LsaInterAreaPrefix, LsaInterAreaRouter,
+    LsaIntraAreaPrefix, LsaIntraAreaPrefixEntry, LsaLink, LsaLinkPrefix,
+    LsaNetwork, LsaRouter, LsaRouterInfo, LsaRouterLink, LsaScopeCode, LsaType,
+    PrefixSid,
+};
+use crate::packet::iana::RouterInfoCaps;
 use crate::packet::lsa::{
     Lsa, LsaHdrVersion, LsaKey, LsaScope, LsaTypeVersion, PrefixSidVersion,
 };
 use crate::packet::tlv::{
     BierEncapSubStlv, BierStlv, DynamicHostnameTlv, NodeAdminTagTlv,
-    PrefixSidFlags, RouterInfoCaps, RouterInfoCapsTlv, SidLabelRangeTlv,
-    SrAlgoTlv, SrLocalBlockTlv,
+    PrefixSidFlags, RouterInfoCapsTlv, SidLabelRangeTlv, SrAlgoTlv,
+    SrLocalBlockTlv,
 };
 use crate::route::{SummaryNet, SummaryNetFlags, SummaryRtr};
 use crate::version::Ospfv3;
@@ -135,9 +138,7 @@ impl LsdbVersion<Self> for Ospfv3 {
                 }
 
                 // (Re)originate Intra-area-prefix-LSA(s).
-                if iface.state.ism_state == ism::State::Dr {
-                    lsa_orig_intra_area_prefix(area, instance, arenas);
-                }
+                lsa_orig_intra_area_prefix(area, instance, arenas);
             }
             LsaOriginateEvent::InterfaceDrChange { area_id, iface_id }
             | LsaOriginateEvent::GrHelperExit { area_id, iface_id } => {
@@ -168,23 +169,27 @@ impl LsdbVersion<Self> for Ospfv3 {
                 let (_, iface) =
                     area.interfaces.get_by_id(&arenas.interfaces, iface_id)?;
 
+                // (Re)originate or flush Link-LSA.
                 if iface.state.ism_state >= ism::State::Waiting {
-                    // (Re)originate or flush Link-LSA.
-                    if iface.state.ism_state >= ism::State::Waiting {
-                        lsa_orig_link(iface, area, instance);
-                    } else {
-                        lsa_flush_link(iface, area, instance, arenas);
-                    }
+                    lsa_orig_link(iface, area, instance);
                 } else {
-                    // (Re)originate Intra-area-prefix-LSA(s).
-                    lsa_orig_intra_area_prefix(area, instance, arenas);
+                    lsa_flush_link(iface, area, instance, arenas);
                 }
+
+                // (Re)originate Intra-area-prefix-LSA(s).
+                lsa_orig_intra_area_prefix(area, instance, arenas);
             }
             LsaOriginateEvent::InterfaceCostChange { area_id } => {
                 let (_, area) = arenas.areas.get_by_id(area_id)?;
 
                 // (Re)originate Router-LSA(s).
                 lsa_orig_router(area, instance, arenas);
+
+                // (Re)originate Intra-area-prefix-LSA(s).
+                lsa_orig_intra_area_prefix(area, instance, arenas);
+            }
+            LsaOriginateEvent::InterfaceFlagChange { area_id } => {
+                let (_, area) = arenas.areas.get_by_id(area_id)?;
 
                 // (Re)originate Intra-area-prefix-LSA(s).
                 lsa_orig_intra_area_prefix(area, instance, arenas);
@@ -359,7 +364,7 @@ impl LsdbVersion<Self> for Ospfv3 {
         if let Some(mut prefix_sid) = summary.prefix_sid {
             // For non-connected prefixes, disable Prefix-SID PHP to ensure
             // end-to-end MPLS forwarding.
-            if summary.flags.contains(SummaryNetFlags::CONNECTED) {
+            if !summary.flags.contains(SummaryNetFlags::CONNECTED) {
                 let flags = prefix_sid.flags_mut();
                 flags.insert(PrefixSidFlags::NP);
                 flags.remove(PrefixSidFlags::E);
@@ -869,9 +874,14 @@ fn lsa_orig_intra_area_prefix(
             // with the interface (if any) are copied into the
             // intra-area-prefix-LSA with the PrefixOptions LA-bit set, the
             // PrefixLength set to 128, and the metric set to 0.
+            let mut prefix_options = PrefixOptions::LA;
+            if iface.config.node_flag
+                && iface.state.ism_state == ism::State::Loopback
+            {
+                prefix_options.insert(PrefixOptions::N);
+            }
             let plen = instance.state.af.max_prefixlen();
             let prefix = IpNetwork::new(prefix.ip(), plen).unwrap();
-            let prefix_options = PrefixOptions::LA | PrefixOptions::N;
             LsaIntraAreaPrefixEntry::new(prefix_options, prefix, 0)
         } else {
             // Otherwise, the list of global prefixes configured in RTX for the
@@ -947,11 +957,7 @@ fn lsa_orig_intra_area_prefix(
                                 }),
                             }
                             .map(|id| {
-                                BierEncapSubStlv::new(
-                                    encap.max_si,
-                                    id,
-                                    (*bsl).into(),
-                                )
+                                BierEncapSubStlv::new(encap.max_si, id, *bsl)
                             })
                         })
                         .collect::<Vec<BierEncapSubStlv>>();

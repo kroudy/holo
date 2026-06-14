@@ -7,6 +7,7 @@
 use std::net::Ipv6Addr;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut, TryGetError};
+use const_addrs::net6;
 use derive_new::new;
 use holo_utils::bytes::{BytesExt, BytesMutExt, TLS_BUF};
 use holo_utils::crypto::CryptoAlgo;
@@ -224,7 +225,7 @@ impl PduVersion<Ipv6Addr, Ipv6Network, DecodeError> for Pdu {
 
     fn new_dump_request() -> Self {
         let rtes = vec![Rte::Ipv6(RteIpv6 {
-            prefix: Ipv6Network::new(Ipv6Addr::UNSPECIFIED, 0).unwrap(),
+            prefix: net6!("::/0"),
             tag: 0,
             metric: Metric::from(Metric::INFINITE),
         })];
@@ -273,17 +274,16 @@ impl Rte {
         // hop. The route tag and prefix length in the next hop RTE must be set
         // to zero on sending and ignored on reception.
         if metric == 0xFF {
+            // A next hop address of :: indicates that the originator of the
+            // advertisement should be used as the next hop.
+            if addr.is_unspecified() {
+                return Ok(Rte::Nexthop(RteNexthop { addr: None }));
+            }
             // An address specified as a next hop must be a link-local address.
             if !addr.is_unicast_link_local() {
                 return Err(DecodeError::InvalidRteNexthop(addr));
             }
-
-            let addr = if addr.is_unspecified() {
-                None
-            } else {
-                Some(addr)
-            };
-            return Ok(Rte::Nexthop(RteNexthop { addr }));
+            return Ok(Rte::Nexthop(RteNexthop { addr: Some(addr) }));
         }
 
         // Sanity checks.

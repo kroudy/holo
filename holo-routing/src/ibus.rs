@@ -7,10 +7,14 @@
 use std::collections::{BTreeMap, hash_map};
 use std::net::IpAddr;
 
-use holo_utils::ibus::{IbusChannelsTx, IbusMsg, IbusSender};
+use holo_utils::ibus::{
+    IbusChannelsTx, IbusClient, IbusClientId, IbusMsg, IbusSender,
+};
 use holo_utils::ip::{AddressFamily, IpNetworkKind, JointPrefixMapExt};
 use holo_utils::protocol::Protocol;
-use holo_utils::southbound::{RouteKeyMsg, RouteMsg};
+use holo_utils::southbound::{
+    AddressFlags, Nexthop, RouteKeyMsg, RouteKind, RouteMsg, RouteOpaqueAttrs,
+};
 use ipnetwork::IpNetwork;
 
 use crate::rib::{NhtEntry, RedistributeSub, Route, RouteFlags};
@@ -18,18 +22,13 @@ use crate::{InstanceId, Master};
 
 // ===== global functions =====
 
-pub(crate) fn process_msg(master: &mut Master, msg: IbusMsg) {
-    // Relay message to protocol instances.
+pub(crate) fn process_msg(
+    master: &mut Master,
+    client: IbusClient,
+    msg: IbusMsg,
+) {
+    // Relay broadcast messages to protocol instances.
     match &msg {
-        IbusMsg::BfdSessionReg { .. } | IbusMsg::BfdSessionUnreg { .. } => {
-            // Relay to the BFD instance.
-            if let Some(instance) = master
-                .instances
-                .get(&InstanceId::new(Protocol::BFD, "main".to_owned()))
-            {
-                send(&instance.ibus_tx, msg.clone());
-            }
-        }
         IbusMsg::KeychainUpd(..)
         | IbusMsg::KeychainDel(..)
         | IbusMsg::PolicyMatchSetsUpd(..)
@@ -44,39 +43,42 @@ pub(crate) fn process_msg(master: &mut Master, msg: IbusMsg) {
     }
 
     match msg {
-        // Interface update notification.
-        IbusMsg::InterfaceUpd(msg) => {
-            master.interfaces.update(msg.ifname, msg.ifindex, msg.flags);
+        // BFD peer (un)registration. Relayed to the BFD instance, with the
+        // client's identity injected from the connection it arrived on.
+        IbusMsg::BfdSessionReg {
+            sess_key,
+            client_id,
+            client_config,
+            ..
+        } => {
+            if let Some(instance) = master
+                .instances
+                .get(&InstanceId::new(Protocol::BFD, "main".to_owned()))
+            {
+                send(
+                    &instance.ibus_tx,
+                    IbusMsg::BfdSessionReg {
+                        client: Some(client),
+                        sess_key,
+                        client_id,
+                        client_config,
+                    },
+                );
+            }
         }
-        // Interface delete notification.
-        IbusMsg::InterfaceDel(ifname) => {
-            master.interfaces.remove(&ifname);
-        }
-        // Interface address addition notification.
-        IbusMsg::InterfaceAddressAdd(msg) => {
-            let Some(iface) = master.interfaces.get_mut_by_name(&msg.ifname)
-            else {
-                return;
-            };
-
-            // Add address to interface.
-            iface.addresses.insert(msg.addr, msg.flags);
-
-            // Add connected route to the RIB.
-            master.rib.connected_route_add(iface, msg);
-        }
-        // Interface address delete notification.
-        IbusMsg::InterfaceAddressDel(msg) => {
-            let Some(iface) = master.interfaces.get_mut_by_name(&msg.ifname)
-            else {
-                return;
-            };
-
-            // Remove address from interface.
-            iface.addresses.remove(&msg.addr);
-
-            // Remove connected route from the RIB.
-            master.rib.connected_route_del(msg);
+        IbusMsg::BfdSessionUnreg { sess_key, .. } => {
+            if let Some(instance) = master
+                .instances
+                .get(&InstanceId::new(Protocol::BFD, "main".to_owned()))
+            {
+                send(
+                    &instance.ibus_tx,
+                    IbusMsg::BfdSessionUnreg {
+                        client: Some(client),
+                        sess_key,
+                    },
+                );
+            }
         }
         IbusMsg::KeychainUpd(keychain) => {
             // Update the local copy of the keychain.
@@ -90,14 +92,12 @@ pub(crate) fn process_msg(master: &mut Master, msg: IbusMsg) {
             master.shared.keychains.remove(&keychain_name);
         }
         // Nexthop tracking registration.
-        IbusMsg::NexthopTrack { subscriber, addr } => {
-            let subscriber = subscriber.unwrap();
-            master.rib.nht_add(subscriber, addr);
+        IbusMsg::NexthopTrack { addr } => {
+            master.rib.nht_add(client, addr);
         }
         // Nexthop tracking unregistration.
-        IbusMsg::NexthopUntrack { subscriber, addr } => {
-            let subscriber = subscriber.unwrap();
-            master.rib.nht_del(subscriber, addr);
+        IbusMsg::NexthopUntrack { addr } => {
+            master.rib.nht_del(client.id, addr);
         }
         IbusMsg::PolicyMatchSetsUpd(match_sets) => {
             // Update the local copy of the policy match sets.
@@ -116,7 +116,7 @@ pub(crate) fn process_msg(master: &mut Master, msg: IbusMsg) {
         }
         IbusMsg::RouteIpAdd(msg) => {
             // Add route to the RIB.
-            master.rib.ip_route_add(msg);
+            master.rib.ip_route_add(msg, client.id);
         }
         IbusMsg::RouteIpDel(msg) => {
             // Remove route from the RIB.
@@ -124,7 +124,7 @@ pub(crate) fn process_msg(master: &mut Master, msg: IbusMsg) {
         }
         IbusMsg::RouteMplsAdd(msg) => {
             // Add MPLS route to the LIB.
-            master.rib.mpls_route_add(msg);
+            master.rib.mpls_route_add(msg, client.id);
         }
         IbusMsg::RouteMplsDel(msg) => {
             // Remove MPLS route from the LIB.
@@ -139,16 +139,11 @@ pub(crate) fn process_msg(master: &mut Master, msg: IbusMsg) {
         IbusMsg::BierPurge => {
             master.birt.entries.clear();
         }
-        IbusMsg::RouteRedistributeSub {
-            subscriber,
-            protocol,
-            af,
-        } => {
-            let subscriber = subscriber.unwrap();
-            let sub = master.rib.subscriptions.entry(subscriber.id).or_insert(
+        IbusMsg::RouteRedistributeSub { protocol, af } => {
+            let sub = master.rib.subscriptions.entry(client.id).or_insert(
                 RedistributeSub {
                     protocols: Default::default(),
-                    tx: subscriber.tx,
+                    tx: client.tx,
                 },
             );
             if matches!(af, None | Some(AddressFamily::Ipv4)) {
@@ -174,23 +169,18 @@ pub(crate) fn process_msg(master: &mut Master, msg: IbusMsg) {
                 };
             if af.is_none() || af == Some(AddressFamily::Ipv4) {
                 for (prefix, routes) in master.rib.ip.ipv4().iter() {
-                    redistribute_prefix((*prefix).into(), routes);
+                    redistribute_prefix(prefix.into(), routes);
                 }
             }
             if af.is_none() || af == Some(AddressFamily::Ipv6) {
                 for (prefix, routes) in master.rib.ip.ipv6().iter() {
-                    redistribute_prefix((*prefix).into(), routes);
+                    redistribute_prefix(prefix.into(), routes);
                 }
             }
         }
-        IbusMsg::RouteRedistributeUnsub {
-            subscriber,
-            protocol,
-            af,
-        } => {
-            let subscriber = subscriber.unwrap();
+        IbusMsg::RouteRedistributeUnsub { protocol, af } => {
             if let hash_map::Entry::Occupied(mut o) =
-                master.rib.subscriptions.entry(subscriber.id)
+                master.rib.subscriptions.entry(client.id)
             {
                 let sub = o.get_mut();
                 if matches!(af, None | Some(AddressFamily::Ipv4)) {
@@ -204,16 +194,76 @@ pub(crate) fn process_msg(master: &mut Master, msg: IbusMsg) {
                 }
             }
         }
-        IbusMsg::Disconnect { subscriber } => {
-            let subscriber = subscriber.unwrap();
-            master.rib.subscriptions.remove(&subscriber.id);
-            for nhte in master.rib.nht.values_mut() {
-                nhte.subscriptions.remove(&subscriber.id);
+        // Ignore other events.
+        _ => {}
+    }
+}
+
+pub(crate) fn process_notification_msg(master: &mut Master, msg: IbusMsg) {
+    match msg {
+        // Interface update notification.
+        IbusMsg::InterfaceUpd(msg) => {
+            master.interfaces.update(msg.ifname, msg.ifindex, msg.flags);
+        }
+        // Interface delete notification.
+        IbusMsg::InterfaceDel(ifname) => {
+            master.interfaces.remove(&ifname);
+        }
+        // Interface address addition notification.
+        IbusMsg::InterfaceAddressAdd(msg) => {
+            let Some(iface) = master.interfaces.get_mut_by_name(&msg.ifname)
+            else {
+                return;
+            };
+
+            // Add address to interface.
+            iface.addresses.insert(msg.addr, msg.flags);
+            let ifindex = iface.ifindex;
+
+            // Add connected route to the RIB.
+            if !msg.flags.contains(AddressFlags::UNNUMBERED) {
+                master.ibus_tx.route_ip_add(RouteMsg {
+                    protocol: Protocol::DIRECT,
+                    kind: RouteKind::Unicast,
+                    prefix: msg.addr.apply_mask(),
+                    distance: 0,
+                    metric: 0,
+                    tag: None,
+                    opaque_attrs: RouteOpaqueAttrs::None,
+                    nexthops: [Nexthop::Interface { ifindex }].into(),
+                });
+            }
+        }
+        // Interface address delete notification.
+        IbusMsg::InterfaceAddressDel(msg) => {
+            let Some(iface) = master.interfaces.get_mut_by_name(&msg.ifname)
+            else {
+                return;
+            };
+
+            // Remove address from interface.
+            iface.addresses.remove(&msg.addr);
+
+            // Remove connected route from the RIB.
+            if !msg.flags.contains(AddressFlags::UNNUMBERED) {
+                master.ibus_tx.route_ip_del(RouteKeyMsg {
+                    protocol: Protocol::DIRECT,
+                    prefix: msg.addr.apply_mask(),
+                });
             }
         }
         // Ignore other events.
         _ => {}
     }
+}
+
+// Cleans up all state associated with a disconnected client.
+pub(crate) fn disconnect(master: &mut Master, id: IbusClientId) {
+    master.rib.subscriptions.remove(&id);
+    for nhte in master.rib.nht.values_mut() {
+        nhte.subscriptions.remove(&id);
+    }
+    master.rib.route_remove_all_by_owner(id);
 }
 
 // Requests information about all interfaces addresses.

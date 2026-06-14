@@ -13,10 +13,11 @@ use crate::interface::{Interface, InterfaceType, ism};
 use crate::lsdb;
 use crate::neighbor::{Neighbor, nsm};
 use crate::network::MulticastAddr;
+use crate::packet::iana::PacketType;
 use crate::packet::lsa::LsaHdrVersion;
 use crate::packet::{
     DbDescFlags, DbDescVersion, LsAckVersion, LsRequestVersion,
-    LsUpdateVersion, PacketHdrVersion, PacketType,
+    LsUpdateVersion, PacketHdrVersion,
 };
 use crate::tasks::messages::output::NetTxPacketMsg;
 use crate::version::Version;
@@ -87,7 +88,7 @@ pub(crate) fn send_dbdesc<V>(
             area,
             OptionsLocation::new_packet(
                 PacketType::DbDesc,
-                iface.state.auth.is_some(),
+                iface.state.auth.load().is_some(),
                 lls.is_some(),
             ),
         ),
